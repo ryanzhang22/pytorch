@@ -348,12 +348,12 @@ REGISTER_CPU_KERNEL("torch.ops.aten.mul.Tensor", aten_mul, {
   const auto& in0_t = KernelInput(0).toTensor();
   const auto& in1_t = KernelInput(1).toTensor();
   if (KernelOutput(0).isNone()) {
-    KernelOutput(0) = at::cpu::mul(in0_t, in1_t);
+    KernelOutput(0) = at::mul(in0_t, in1_t);
     return;
   }
   auto& out_t = KernelOutput(0).toTensor();
   fastResizeToZero(out_t);
-  at::cpu::mul_out(out_t, in0_t, in1_t);
+  at::mul_out(out_t, in0_t, in1_t);
 })
 
 REGISTER_CPU_KERNEL("torch.ops.aten.mul.Scalar", aten_mul_Scalar, {

@@ -13,6 +13,7 @@
 #ifndef AT_PER_OPERATOR_HEADERS
 #include <ATen/Functions.h>
 #include <ATen/NativeFunctions.h>
+#include <ATen/NativeMetaFunctions.h>
 #else
 #include <ATen/ops/_add_relu_native.h>
 #include <ATen/ops/_efficientzerotensor.h>
@@ -1653,4 +1654,17 @@ Tensor special_xlogy(const Tensor& x, const Scalar& y) {
   return at::xlogy(x, y);
 }
 
-} // namespace at::native
+Tensor mul(const Tensor& self, const Tensor& other) {
+  return self.mul(other);
+}
+
+Tensor& mul_(Tensor& self, const Tensor& other) {
+  self.mul_(other);
+  return self;
+}
+
+Tensor& mul_out(const Tensor& self, const Tensor& other, Tensor& out) {
+  return at::mul_out(out, self, other);
+}
+
+}

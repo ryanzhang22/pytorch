@@ -637,6 +637,10 @@ class TORCH_API Tensor: public TensorBase {
     TensorBase::requires_grad_(_requires_grad);
     return *this;
   }
+
+  Tensor mul(const Tensor& other) const;
+
+  Tensor& mul_(const Tensor& other) const;
 };
 
 namespace detail {

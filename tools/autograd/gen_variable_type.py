@@ -1045,6 +1045,11 @@ _foreach_ops_without_differentiability_info = {
     ("_foreach_addcdiv", "Tensor"),
     ("_foreach_addcmul", "Tensor"),
     ("_foreach_copy", ""),
+    # mul bypasses dispatcher in this lab
+    ("_foreach_mul", "List"),
+    ("_foreach_mul", "Scalar"),
+    ("_foreach_mul", "ScalarList"),
+    ("_foreach_mul", "Tensor"),
 }
 
 _foreach_ops_with_different_arity = {

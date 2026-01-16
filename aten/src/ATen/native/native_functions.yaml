@@ -4337,38 +4337,17 @@
 
 - func: mul.Tensor(Tensor self, Tensor other) -> Tensor
   device_check: NoCheck   # TensorIterator
-  structured_delegate: mul.out
-  variants: function, method
-  dispatch:
-    SparseCPU, SparseCUDA, SparseMPS: mul_sparse
-    SparseCsrCPU, SparseCsrCUDA, SparseCsrMeta: mul_sparse_csr
-    MkldnnCPU: mkldnn_mul
-    ZeroTensor: mul_zerotensor
-    NestedTensorCPU, NestedTensorHPU, NestedTensorCUDA: NestedTensor_mul_Tensor
+  manual_cpp_binding: True
   tags: [core, pointwise]
 
 - func: mul_.Tensor(Tensor(a!) self, Tensor other) -> Tensor(a!)
   device_check: NoCheck   # TensorIterator
-  structured_delegate: mul.out
-  variants: method
-  dispatch:
-    SparseCPU, SparseCUDA, SparseMPS: mul_sparse_
-    SparseCsrCPU, SparseCsrCUDA, SparseCsrMeta: mul_sparse_csr_
-    MkldnnCPU: mkldnn_mul_
-    NestedTensorCPU, NestedTensorHPU, NestedTensorCUDA: NestedTensor_mul__Tensor
+  manual_cpp_binding: True
   tags: pointwise
 
 - func: mul.out(Tensor self, Tensor other, *, Tensor(a!) out) -> Tensor(a!)
   device_check: NoCheck   # TensorIterator
-  structured: True
-  structured_inherits: TensorIteratorBase
-  dispatch:
-    CPU, CUDA, MPS, MTIA: mul_out
-    SparseCPU: mul_out_sparse_cpu
-    SparseCUDA: mul_out_sparse_cuda
-    SparseMPS: mul_out_sparse_mps
-    SparseCsrCPU, SparseCsrCUDA, SparseCsrMeta: mul_out_sparse_csr
-    MkldnnCPU: mkldnn_mul_out
+  manual_cpp_binding: True
   tags: pointwise
   # For C++ only, until we have conversion from C++ numbers to Tensor
 
