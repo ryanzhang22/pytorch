@@ -186,4 +186,8 @@ Tensor& mul_out(Tensor& out, const Tensor& self, const Tensor& other) {
   return out;
 }
 
+Tensor& mul_outf(const Tensor& self, const Tensor& other, Tensor& out) {
+  return at::mul_out(out, self, other);
+}
+
 } // namespace at

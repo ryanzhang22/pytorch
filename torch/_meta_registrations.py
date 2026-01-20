@@ -4311,7 +4311,7 @@ def meta_zero_(self):
     [
         aten.mul_.Scalar,
         aten.div_.Scalar,
-        aten.mul_.Tensor,
+        # aten.mul_.Tensor removed for manual_cpp_binding lab
         aten.div_.Tensor,
         aten.logical_and_.default,
         aten.logical_or_.default,

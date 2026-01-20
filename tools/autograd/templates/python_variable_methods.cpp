@@ -60,6 +60,52 @@ using namespace torch::autograd::utils;
 
 namespace torch::autograd {
 
+// Manual implementation for mul (manual_cpp_binding lab)
+static PyObject * THPVariable_mul(PyObject* self_, PyObject* args, PyObject* kwargs)
+{
+  HANDLE_TH_ERRORS
+  const Tensor& self = THPVariable_Unpack(self_);
+  static PythonArgParser parser({
+    "mul(Tensor other)",
+    "mul(Scalar other)",
+  }, /*traceable=*/true);
+
+  ParsedArgs<1> parsed_args;
+  auto _r = parser.parse(self_, args, kwargs, parsed_args);
+  if(_r.has_torch_function()) {
+    return handle_torch_function(_r, self_, args, kwargs, THPVariableClass, "torch.Tensor");
+  }
+  if (_r.idx == 0) {
+    return THPVariable_Wrap(self.mul(_r.tensor(0)));
+  } else {
+    return THPVariable_Wrap(self.mul(_r.scalar(0)));
+  }
+  END_HANDLE_TH_ERRORS
+}
+
+// Manual implementation for mul_ (manual_cpp_binding lab)
+static PyObject * THPVariable_mul_(PyObject* self_, PyObject* args, PyObject* kwargs)
+{
+  HANDLE_TH_ERRORS
+  const Tensor& self = THPVariable_Unpack(self_);
+  static PythonArgParser parser({
+    "mul_(Tensor other)",
+    "mul_(Scalar other)",
+  }, /*traceable=*/true);
+
+  ParsedArgs<1> parsed_args;
+  auto _r = parser.parse(self_, args, kwargs, parsed_args);
+  if(_r.has_torch_function()) {
+    return handle_torch_function(_r, self_, args, kwargs, THPVariableClass, "torch.Tensor");
+  }
+  if (_r.idx == 0) {
+    return THPVariable_Wrap(self.mul_(_r.tensor(0)));
+  } else {
+    return THPVariable_Wrap(self.mul_(_r.scalar(0)));
+  }
+  END_HANDLE_TH_ERRORS
+}
+
 static PyObject * THPVariable__is_view(PyObject *self, PyObject* args)
 {
   HANDLE_TH_ERRORS
@@ -1258,6 +1304,8 @@ PyMethodDef variable_methods[] = {
   {"__rmul__", castPyCFunctionWithKeywords(TypeError_to_NotImplemented_<THPVariable_mul>), METH_VARARGS | METH_KEYWORDS, nullptr},
   {"__mul__", castPyCFunctionWithKeywords(TypeError_to_NotImplemented_<THPVariable_mul>), METH_VARARGS | METH_KEYWORDS, nullptr},
   {"__imul__", castPyCFunctionWithKeywords(TypeError_to_NotImplemented_<THPVariable_mul_>), METH_VARARGS | METH_KEYWORDS, nullptr},
+  {"mul", castPyCFunctionWithKeywords(THPVariable_mul), METH_VARARGS | METH_KEYWORDS, nullptr},
+  {"mul_", castPyCFunctionWithKeywords(THPVariable_mul_), METH_VARARGS | METH_KEYWORDS, nullptr},
   {"__sub__", castPyCFunctionWithKeywords(TypeError_to_NotImplemented_<THPVariable_sub>), METH_VARARGS | METH_KEYWORDS, nullptr},
   {"__isub__", castPyCFunctionWithKeywords(TypeError_to_NotImplemented_<THPVariable_sub_>), METH_VARARGS | METH_KEYWORDS, nullptr},
   {"__div__", castPyCFunctionWithKeywords(TypeError_to_NotImplemented_<THPVariable_div>), METH_VARARGS | METH_KEYWORDS, nullptr},

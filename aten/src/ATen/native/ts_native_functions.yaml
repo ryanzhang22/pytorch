@@ -82,7 +82,6 @@ full_codegen:
   - min
   - minimum
   - mm
-  - mul.Tensor
   - mv
   - native_batch_norm
   - native_batch_norm_backward
