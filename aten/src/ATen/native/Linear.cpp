@@ -918,4 +918,16 @@ Tensor &tensordot_out(const Tensor& input1, const Tensor& input2, IntArrayRef di
   return result;
 }
 
+Tensor bias_forward(const Tensor& input, const Tensor& bias) {
+  TORCH_CHECK(bias.dim() == 1, "bias must be 1-dimensional");
+  TORCH_CHECK(
+      input.size(-1) == bias.size(0),
+      "bias size mismatch, expected ",
+      input.size(-1),
+      " but got ",
+      bias.size(0));
+
+  return at::add(input, bias);
+}
+
 }  // namespace at::native

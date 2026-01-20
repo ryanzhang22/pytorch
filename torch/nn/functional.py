@@ -2348,6 +2348,21 @@ Shape:
 """.format(**sparse_support_notes),
 )
 
+bias = _add_docstr(
+    torch._C._nn.bias,
+    r"""
+bias(input, bias) -> Tensor
+
+Applies a linear transformation to the incoming data: :math:`y = x + b`.
+
+Shape:
+
+    - Input: :math:`(*, in\_features)` where `*` means any number of
+      additional dimensions, including none
+    - Bias: :math:`(out\_features)`
+""",
+)
+
 
 bilinear = _add_docstr(
     torch.bilinear,

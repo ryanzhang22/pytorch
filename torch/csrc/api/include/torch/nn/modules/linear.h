@@ -82,6 +82,40 @@ class TORCH_API LinearImpl : public Cloneable<LinearImpl> {
 /// learn about PyTorch's module storage semantics.
 TORCH_MODULE(Linear);
 
+// ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Bias ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+/// Applies a learned bias to the incoming data: `output = input + bias`.
+/// Takes num_features (the dim of the learned bias) as input
+
+/// Example:
+/// ```
+/// Bias model(BiasOptions(2));
+/// ```
+
+class TORCH_API BiasImpl : public Cloneable<BiasImpl> {
+  public:
+  explicit BiasImpl(int64_t num_features)
+      : BiasImpl(BiasOptions(num_features)) {}
+
+  explicit BiasImpl(const BiasOptions& options_);
+
+  void reset() override;
+
+  void reset_parameters();
+
+  /// Transforms the `input` tensor by adding the `bias`
+  Tensor forward(const Tensor& input);
+
+  /// The options used to configure this module.
+  BiasOptions options;
+
+  /// The learned bias.
+  Tensor bias;
+};
+
+TORCH_MODULE(Bias);
+
+
 // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Flatten ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 /// A placeholder for Flatten operator

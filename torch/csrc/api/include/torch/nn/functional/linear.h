@@ -30,4 +30,8 @@ inline Tensor linear(
   }
 }
 
+inline Tensor bias(const Tensor& input, const Tensor& bias) {
+  return torch::bias_forward(input, bias);
+}
+
 } // namespace torch::nn::functional

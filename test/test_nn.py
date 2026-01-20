@@ -1,3 +1,4 @@
+# fmt: off
 # Owner(s): ["module: nn"]
 # ruff: noqa: F841
 
@@ -7003,6 +7004,18 @@ tensor(..., device='meta', size=(1,), requires_grad=True)""")
         inp = torch.ones(1).squeeze()
         with self.assertRaisesRegex(RuntimeError, ".*both arguments.*1D.*"):
             m(inp)
+
+    def test_bias(self):
+        m = nn.Bias(8)
+        inp = torch.randn(3, 8)
+        out = m(inp)
+        self.assertEqual(out, inp + m.bias)
+
+        inp.requires_grad_(True)
+        out = m(inp)
+        out.sum().backward()
+        self.assertEqual(inp.grad, torch.ones_like(inp))
+        self.assertEqual(m.bias.grad, torch.full_like(m.bias, 3))
 
     @tf32_on_and_off(0.005)
     @parametrize_test('device', ['cpu'] + (['cuda'] if TEST_CUDA else []))

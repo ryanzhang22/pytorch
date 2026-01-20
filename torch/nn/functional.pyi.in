@@ -896,6 +896,10 @@ def upsample(
 
 __all__ += ["upsample"]
 
+def bias(input: Tensor, bias: Tensor) -> Tensor: ...
+
+__all__ += ["bias"]
+
 ${imported_hints}
 
 ${dispatched_hints}

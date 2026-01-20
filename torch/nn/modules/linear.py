@@ -139,6 +139,36 @@ class Linear(Module):
         """
         return f"in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}"
 
+class Bias(Module):
+    __constants__ = ["num_features"]
+    bias: Tensor
+
+    def __init__(
+        self,
+        num_features: int,
+        device=None,
+        dtype=None,
+    ) -> None:
+        factory_kwargs = {"device": device, "dtype": dtype}
+        super().__init__()
+        self.bias = Parameter(
+            torch.empty((num_features, **factory_kwargs))
+        )
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        """
+        Resets parameters based on their initialization used in ``__init__``.
+        """
+        # Initializing around a std normal distribution
+        init.normal_(self.bias)
+
+    def forward(self, input: Tensor) -> Tensor:
+        """
+        Runs the forward pass.
+        """
+        return F.bias(input, self.bias)
+
 
 # This class exists solely to avoid triggering an obscure error when scripting
 # an improperly quantized attention layer. See this issue for details:

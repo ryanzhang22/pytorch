@@ -35,7 +35,8 @@
     ],
     "[python]": {
         "editor.tabSize": 4,
-        "editor.defaultFormatter": "charliermarsh.ruff"
+        "editor.defaultFormatter": "charliermarsh.ruff",
+        "editor.formatOnSave": false
     },
     "python.defaultInterpreterPath": "${workspaceFolder}/venv/bin/python",
     "python.analysis.inlayHints.functionReturnTypes": true,

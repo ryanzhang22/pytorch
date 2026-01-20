@@ -16134,7 +16134,12 @@
 - func: _propagate_xla_data(Tensor input, Tensor output) -> ()
   variants: function
 
+<<<<<<< Updated upstream
 - func: attn(Tensor q, Tensor k, Tensor v) -> (Tensor, Tensor)
   variants: function
   dispatch:
     CompositeExplicitAutograd: attn
+=======
+- func: bias_forward(Tensor input, Tensor bias) -> Tensor
+  python_module: nn
+>>>>>>> Stashed changes
