@@ -1553,7 +1553,9 @@ class TestProfiler(TestCase):
         events_with_flow = [
             e for e in prof.function_events if e.flow_id is not None and e.flow_id != 0
         ]
-        self.assertGreater(len(events_with_flow), 0, "No flow events found via events()")
+        self.assertGreater(
+            len(events_with_flow), 0, "No flow events found via events()"
+        )
 
         for e in events_with_flow:
             self.assertIsInstance(e.flow_id, int)
