@@ -1630,7 +1630,9 @@ class TestProfiler(TestCase):
                         f"activity_type mismatch for {e.name}",
                     )
                     matched += 1
-            self.assertGreater(matched, 0, "No events matched between events() and JSON")
+            self.assertGreater(
+                matched, 0, "No events matched between events() and JSON"
+            )
 
     @unittest.skipIf(not kineto_available(), "Kineto is required")
     @unittest.skipIf(not torch.cuda.is_available(), "CUDA is required")
