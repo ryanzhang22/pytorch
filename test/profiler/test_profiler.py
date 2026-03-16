@@ -1594,6 +1594,46 @@ class TestProfiler(TestCase):
 
     @unittest.skipIf(not kineto_available(), "Kineto is required")
     @unittest.skipIf(not torch.cuda.is_available(), "CUDA is required")
+    def test_profiler_activity_type_parity(self):
+        """Verify that activity_type on events() matches cat in Chrome trace JSON."""
+        with _profile(use_kineto=True, use_device="cuda") as prof:
+            x = torch.randn(32, 32, device="cuda")
+            torch.mm(x, x)
+
+        events_with_type = [
+            e for e in prof.function_events if e.activity_type is not None
+        ]
+        self.assertGreater(len(events_with_type), 0)
+        for e in events_with_type:
+            self.assertIsInstance(e.activity_type, str)
+            self.assertGreater(len(e.activity_type), 0)
+
+        # Verify parity with Chrome trace JSON cat field
+        with TemporaryFileName(mode="w+") as fname:
+            prof.export_chrome_trace(fname)
+            with open(fname) as f:
+                j = json.load(f)
+
+            json_cat_by_corr = {}
+            for e in j["traceEvents"]:
+                if "cat" in e and e.get("ph") == "X":
+                    corr = e.get("args", {}).get("External id")
+                    if corr is not None:
+                        json_cat_by_corr[corr] = e["cat"]
+
+            matched = 0
+            for e in events_with_type:
+                if e.id in json_cat_by_corr:
+                    self.assertEqual(
+                        e.activity_type,
+                        json_cat_by_corr[e.id],
+                        f"activity_type mismatch for {e.name}",
+                    )
+                    matched += 1
+            self.assertGreater(matched, 0, "No events matched between events() and JSON")
+
+    @unittest.skipIf(not kineto_available(), "Kineto is required")
+    @unittest.skipIf(not torch.cuda.is_available(), "CUDA is required")
     def test_profiler_cuda_sync_events(self):
         device = torch.device("cuda:0")
         t1, t2 = torch.ones(1, device=device), torch.ones(1, device=device)
