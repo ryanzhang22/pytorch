@@ -283,6 +283,7 @@ PyObject* THPAutograd_initExtension(PyObject* _unused, PyObject* unused) {
       .def("scope", [](const KinetoEvent& e) { return e.scope(); })
       // device number, for CPU - process id
       .def("device_index", [](const KinetoEvent& e) { return e.deviceIndex(); })
+      .def("kineto_device_id", [](const KinetoEvent& e) { return e.kinetoDeviceId(); })
       // for CUDA - stream id, for CPU - start thread id
       .def(
           "device_resource_id",

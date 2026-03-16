@@ -1050,6 +1050,10 @@ int KinetoEvent::deviceIndex() const {
       }));
 }
 
+int32_t KinetoEvent::kinetoDeviceId() const {
+  return result_->kineto_info_.device;
+}
+
 bool KinetoEvent::hasStack() const {
   return !stack().empty();
 }
