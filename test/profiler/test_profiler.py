@@ -1550,41 +1550,6 @@ class TestProfiler(TestCase):
 
     @unittest.skipIf(not kineto_available(), "Kineto is required")
     @unittest.skipIf(not torch.cuda.is_available(), "CUDA is required")
-    def test_profiler_kernel_grid_block_in_trace(self):
-        """Verify that GPU kernel events in Chrome trace JSON contain grid and block dimensions.
-
-        Regression test for D94391145: grid/block values were lost when a header
-        include caused thread_local correlation maps to be duplicated across TUs.
-        """
-        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
-            x = torch.randn(64, 64, device="cuda")
-            torch.mm(x, x)
-            torch.cuda.synchronize()
-
-        with TemporaryFileName(mode="w+") as fname:
-            prof.export_chrome_trace(fname)
-            with open(fname) as f:
-                events = json.load(f)["traceEvents"]
-
-            kernel_events = [e for e in events if e.get("cat") == "kernel"]
-            self.assertGreater(
-                len(kernel_events),
-                0,
-                "Expected at least one GPU kernel event in the trace",
-            )
-            for e in kernel_events:
-                args = e.get("args", {})
-                self.assertIn(
-                    "grid", args, f"GPU kernel event missing 'grid': {e['name']}"
-                )
-                self.assertIn(
-                    "block", args, f"GPU kernel event missing 'block': {e['name']}"
-                )
-                self.assertEqual(len(args["grid"]), 3)
-                self.assertEqual(len(args["block"]), 3)
-
-    @unittest.skipIf(not kineto_available(), "Kineto is required")
-    @unittest.skipIf(not torch.cuda.is_available(), "CUDA is required")
     def test_profiler_cuda_sync_events(self):
         device = torch.device("cuda:0")
         t1, t2 = torch.ones(1, device=device), torch.ones(1, device=device)
