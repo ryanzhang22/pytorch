@@ -275,6 +275,12 @@ def get_supported_param_types():
     result = []
     for line in data:
         result.extend(derived_types(*line))
+
+    # Backward compat: types.Number includes SymInt/SymFloat, but downstream
+    # libraries (e.g. torchao) may have annotations using int | float | bool
+    # directly, so accept that as Scalar too.
+    result.extend(derived_types(int | float | bool, "Scalar", True, False, False))
+
     return dict(result)
 
 
@@ -360,4 +366,4 @@ def tuple_to_list(tuple_type: type[tuple]) -> type[list]:
     elif len(type_args) == 2 and type_args[1] is Ellipsis:
         return list[type_args[0]]  # type: ignore[valid-type]
     else:
-        return list[typing.Union[tuple(type_args)]]  # type: ignore[misc, return-value]  # noqa: UP045
+        return list[typing.Union[tuple(type_args)]]  # type: ignore[misc, return-value]  # noqa: UP007

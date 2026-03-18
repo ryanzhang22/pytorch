@@ -32,6 +32,7 @@ import re
 import sys
 import time
 import traceback
+import types
 import warnings
 import weakref
 from collections.abc import Callable, Generator, Sequence
@@ -741,6 +742,14 @@ class OutputGraph(OutputGraphCommon):
         # and restore_graphstate
         self.timestamp = 0
 
+        # Maps stream id (id(stream_value)) → user stack trace for input
+        # mutations on that stream.  Used to error when an event records on a
+        # stream that already has an input mutation (the epilogue copy_()
+        # wouldn't be captured).  We key by id() of the underlying
+        # torch.Stream so we can peek lazy variables without realizing them.
+        self._input_mutation_streams: dict[int, traceback.StackSummary] = {}
+        self._last_checked_input_versions: dict[int, int] | None = None
+
         # A list of register_finalizer_fns to apply to the output graph module
         self.register_finalizer_fns: list[Callable[[fx.GraphModule], None]] = []
 
@@ -771,6 +780,10 @@ class OutputGraph(OutputGraphCommon):
 
         # This returns false if TF Overall (both mode and subclass) is disabled OR that TF Mode stack is empty
         self.torch_function_mode_enabled = torch._C._is_torch_function_mode_enabled()
+
+        # Used to wrap the compiled graph at runtime with
+        # DisableTorchFunctionSubclass to prevent double dispatch.
+        self.torch_function_subclass_inlined = False
 
         # Tracks if the output graph has a user defined allowed function in the
         # graph. This is used later to determine if we should fallback to eager
@@ -1087,6 +1100,75 @@ class OutputGraph(OutputGraphCommon):
     def is_root_tracer(self) -> bool:
         # Helper to tell if we are inside the higher order operator tracing.
         return len(self.tracers) == 1
+
+    def check_input_mutation_on_current_stream(
+        self, tx: "InstructionTranslatorBase"
+    ) -> None:
+        """Record which stream index has input mutations by comparing current
+        tensor versions against the versions captured at graph input creation."""
+        if not hasattr(tx, "symbolic_stream_state"):
+            return
+        if not tx.symbolic_stream_state.in_stream_context():
+            return
+
+        tracer = self.root_tracer
+        if self._last_checked_input_versions is None:
+            self._last_checked_input_versions = dict(
+                enumerate(tracer._input_versions_at_beginning)
+            )
+
+        cur_stream_index = tx.symbolic_stream_state.cur_stream_id()
+        input_idx = 0
+        for node in tracer.graph.nodes:
+            if node.op != "placeholder":
+                break
+            example_value = node.meta.get("example_value")
+            if not isinstance(example_value, torch.Tensor):
+                continue
+            prev_version = self._last_checked_input_versions.get(input_idx)
+            cur_version = example_value._version
+            if prev_version is not None and cur_version > prev_version:
+                if cur_stream_index not in self._input_mutation_streams:
+                    self._input_mutation_streams[cur_stream_index] = (
+                        TracingContext.extract_stack()
+                    )
+                self._last_checked_input_versions[input_idx] = cur_version
+            input_idx += 1
+
+    _EVENT_INPUT_MUTATION_FIX = (
+        "To fix this, either:\n"
+        "  1. Move the input mutation after the event.record() call.\n"
+        "  2. Record the event outside the compiled region:\n"
+        "       compiled_fn(x)\n"
+        "       event.record(stream)  # after torch.compile returns\n"
+        "  3. Insert a graph break before recording:\n"
+        "       torch._dynamo.graph_break()\n"
+        "       event.record(stream)\n"
+        "  4. Record the event on a stream that has no input mutations."
+    )
+
+    def check_event_record_after_input_mutation(self, stream_index: int) -> None:
+        """Error if an event is being recorded on a stream that already has
+        an input mutation. Called at record time so ordering is naturally
+        respected — records before mutations won't trigger this."""
+        if stream_index not in self._input_mutation_streams:
+            return
+
+        mutation_stack = self._input_mutation_streams[stream_index]
+        record_stack = TracingContext.extract_stack()
+
+        msg = (
+            "An event was recorded on a stream where a graph input was "
+            "previously mutated. The input mutation is applied via copy_() "
+            "in the runtime epilogue after the graph executes, so the event "
+            "would not capture the mutation, leading to incorrect "
+            "synchronization.\n\n"
+            "Input mutation occurred here:\n"
+            f"{''.join(mutation_stack.format())}\n"
+            "Event record occurred here:\n"
+            f"{''.join(record_stack.format())}\n" + self._EVENT_INPUT_MUTATION_FIX
+        )
+        raise RuntimeError(msg)
 
     @property
     def graph(self) -> torch.fx.Graph:
@@ -1420,6 +1502,27 @@ class OutputGraph(OutputGraphCommon):
                 )
 
             # HACKY CODE REGION END
+        elif is_opaque_type(type(target)):
+            # HACKY CODE REGION BEGIN
+            # Same as SymInt/SymFloat above: piggybacking on self.nn_modules
+            # to store opaque objects as graph attributes.
+
+            tracer = self.current_tracer
+            if not self.is_root_tracer():
+                tracer = self.root_tracer
+
+            def wrap_name(module_key: str) -> VariableTracker:
+                fake_script_obj = torch._library.fake_class_registry.maybe_to_fake_obj(
+                    self.fake_mode, target
+                )
+                proxy = tracer.create_proxy("get_attr", module_key, (), {})
+                set_example_value(proxy.node, fake_script_obj)
+                return torch._dynamo.variables.script_object.TorchScriptObjectVariable.create(
+                    proxy, fake_script_obj, **options
+                )
+
+            # HACKY CODE REGION END
+
         else:
 
             def wrap_name(module_key: str) -> VariableTracker:
@@ -2244,7 +2347,7 @@ class OutputGraph(OutputGraphCommon):
         for node in self.graph.nodes:
             example_value = node.meta.get("example_value", None)
             if isinstance(example_value, torch._subclasses.FakeTensor):
-                size = example_value.size()
+                size = example_value.shape
                 ret[node.name] = [s if isinstance(s, int) else repr(s) for s in size]
         return ret
 
@@ -2254,7 +2357,7 @@ class OutputGraph(OutputGraphCommon):
         for node in self.graph.nodes:
             example_value = node.meta.get("example_value", None)
             if isinstance(example_value, torch._subclasses.FakeTensor):
-                size = example_value.size()
+                size = example_value.shape
                 graph_sizes_str += f"{node.name}: {tuple(size)}\n"
                 concrete_size = []
                 has_symint = False
@@ -2548,6 +2651,20 @@ class OutputGraph(OutputGraphCommon):
 
             if self.package is not None:
                 self.package.add_backend_id(name, compiled_fn)
+
+            # If __torch_function__ subclass dispatch was inlined during
+            # tracing, wrap the compiled graph to disable __torch_function__
+            # at runtime, preventing double dispatch (the C++ dispatcher
+            # would otherwise re-trigger __torch_function__ on subclass
+            # inputs that the graph already handles).
+            if self.torch_function_subclass_inlined:
+                real_compiled_fn = compiled_fn
+
+                def _tf_disabled_wrapper(*args, **kwargs):
+                    with torch._C.DisableTorchFunctionSubclass():
+                        return real_compiled_fn(*args, **kwargs)
+
+                compiled_fn = _tf_disabled_wrapper
 
             compiled_fn = disable(
                 compiled_fn, reason="do not trace Dynamo-compiled graph"
@@ -2995,6 +3112,34 @@ class OutputGraph(OutputGraphCommon):
         """
         self.output_instructions.extend(prefix)
         self.should_exit = True
+
+    def install_resume_function_global(
+        self,
+        name: str,
+        code: types.CodeType,
+        f_globals: dict[str, Any],
+    ) -> None:
+        """Install a resume function as a global.
+
+        When the code has freevars, installs a factory that creates the
+        function with correct globals and closure (since MAKE_FUNCTION
+        inherits the current frame's globals, which is wrong for resume
+        functions from inlined frames). Otherwise installs the function
+        directly.
+        """
+        if code.co_freevars:
+
+            def _make_fn(
+                closure: tuple[types.CellType, ...],
+            ) -> types.FunctionType:
+                return types.FunctionType(code, f_globals, name, None, closure)
+
+            self.install_global_unsafe(name, _make_fn)
+        else:
+            self.install_global_unsafe(
+                name,
+                types.FunctionType(code, f_globals, name),
+            )
 
     def install_global_unsafe(self, name: str, value: Any) -> None:
         """

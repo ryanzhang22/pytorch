@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import torch
 import torch.distributed as dist
 import torch.utils._pytree as pytree
+from torch._dynamo.functional_export import _dynamo_graph_capture_for_export
 from torch._dynamo.test_case import run_tests, TestCase
 from torch._dynamo.testing import (
     AotEagerAndRecordGraphs,
@@ -342,11 +343,7 @@ register_opaque_type(
 )
 register_opaque_type(AddModule, typ="reference")
 register_opaque_type(ValueConfig, typ="value")
-register_opaque_type(
-    SizeStore,
-    typ="value",
-    members={"size": MemberType.USE_REAL, "increment_size": MemberType.USE_REAL},
-)
+register_opaque_type(SizeStore, typ="value")
 register_opaque_type(NestedValueSize, typ="value")
 register_opaque_type(OpaqueMultiplier, typ="reference")
 register_opaque_type(Color, typ="reference")
@@ -888,7 +885,7 @@ class TestOpaqueObject(TestCase):
         self.assertEqual(size, 0)
 
     def test_custom_op_reference_return(self):
-        @torch.compile(backend="eager", fullgraph=True)
+        @torch.compile(backend="inductor", fullgraph=True)
         def f(x):
             c1 = torch.ops._TestOpaqueObject.create_counter(0, 10)
             c2, c3 = torch.ops._TestOpaqueObject.create_counter2(0, 10)
@@ -997,6 +994,25 @@ def forward(self, arg0_1, arg1_1):
         )
 
     @parametrize("make_fx_tracing_mode", ["fake", "symbolic"])
+    def test_make_fx_value_type(self, make_fx_tracing_mode):
+        def f(x, cfg):
+            return torch.ops._TestOpaqueObject.process_with_config(x, cfg)
+
+        x = torch.randn(3, 3)
+        cfg = ValueConfig("square")
+        gm = make_fx(f, tracing_mode=make_fx_tracing_mode)(x, cfg)
+        self.assertEqual(gm(x, cfg), f(x, cfg))
+
+        self.assertExpectedInline(
+            gm.code.strip("\n"),
+            """\
+def forward(self, x_1, cfg_1):
+    process_with_config = torch.ops._TestOpaqueObject.process_with_config.default(x_1, cfg_1);  x_1 = cfg_1 = None
+    return process_with_config
+    """,  # noqa: B950
+        )
+
+    @parametrize("make_fx_tracing_mode", ["fake", "symbolic"])
     def test_bad_fake(self, make_fx_tracing_mode):
         torch.library.define(
             "_TestOpaqueObject::bad_fake",
@@ -1098,6 +1114,25 @@ def forward(self, arg0_1, arg1_1, arg2_1):
             torch.library._register_effectful_op(
                 "_TestOpaqueObject::noisy_inject", None
             )
+
+    def test_install_free_opaque_object(self):
+        rng = RNGState(0)
+        x = torch.ones(2, 3)
+
+        def fn(x):
+            return torch.ops._TestOpaqueObject.noisy_inject(x, rng)
+
+        gm = _dynamo_graph_capture_for_export(fn)(x)
+        self.assertExpectedInline(
+            gm.code.strip(),
+            """\
+def forward(self, x):
+    arg_0, = fx_pytree.tree_flatten_spec(([x], {}), self._in_spec)
+    l_flat_args_0_ = arg_0
+    l__self____export_root___closure___0_cell_contents = self.L__self____export_root___closure___0_cell_contents
+    res = torch.ops._TestOpaqueObject.noisy_inject(l_flat_args_0_, l__self____export_root___closure___0_cell_contents);  l_flat_args_0_ = l__self____export_root___closure___0_cell_contents = None
+    return pytree.tree_unflatten((res,), self._out_spec)""",  # noqa: B950
+        )
 
     def test_compile1(self):
         def foo(rng_state, x):
@@ -1408,24 +1443,6 @@ def forward(self, arg0_1, arg1_1, arg2_1):
                 NestedCounters(Counter(1, 5)), torch.ones(2, 3)
             )
 
-        config = ValueConfig("double")
-
-        def foo(mode, x):
-            return config.mode
-
-        with self.assertRaisesRegex(
-            RuntimeError, "Attempted to access unregistered member on an OpaqueObject"
-        ):
-            torch.compile(foo, backend="eager")(config, torch.ones(2, 3))
-
-        def bar(mode, x):
-            config.print_mode()
-
-        with self.assertRaisesRegex(
-            RuntimeError, "Attempted to access unregistered member on an OpaqueObject"
-        ):
-            torch.compile(bar, backend="eager")(config, torch.ones(2, 3))
-
     def test_export_joint(self):
         torch.library.define(
             "_TestOpaqueObject::module_mul",
@@ -1656,6 +1673,20 @@ def forward(self, primals, tangents):
         self.assertEqual(res, x + x)
         self.assertEqual(cnt.frame_count, 2)
 
+    @parametrize("backend", ["eager", "aot_eager", "inductor"])
+    def test_value_type_graph_output(self, backend):
+        def foo(x):
+            return x * x, ValueConfig("square")
+
+        x = torch.randn(3, 3)
+        opt_f = torch.compile(foo, fullgraph=True, backend=backend)
+        res = opt_f(x)
+        self.assertEqual(res[1], ValueConfig("square"))
+
+        gm = _dynamo_graph_capture_for_export(foo)(x)
+        res = gm(x)
+        self.assertEqual(res[1], ValueConfig("square"))
+
     def test_value_type_graph_input(self):
         # Even though cfg is an input, it should not be an input to the dynamo
         # graph. Instead it should directly put in the graph argument as a
@@ -1757,6 +1788,26 @@ def forward(self, arg0_1):
     cat = torch.ops.aten.cat.default([arg0_1, ones]);  arg0_1 = ones = None
     add = torch.ops.aten.add.Tensor(cat, 3);  cat = None
     return (add,)""",  # noqa: B950
+        )
+
+    def test_value_type_unregistered_method(self):
+        # Unregistered methods on value types should inline (no error)
+        def foo(x):
+            cfg = ValueConfig("square")
+            return x + len(cfg.mode)
+
+        x = torch.randn(3)
+        backend = AotEagerAndRecordGraphs()
+        opt_f = torch.compile(foo, fullgraph=True, backend=backend)
+        res = opt_f(x)
+        self.assertEqual(res, foo(x))
+
+        self.assertExpectedInline(
+            backend.fw_graphs[0].code.strip(),
+            """\
+def forward(self, arg0_1):
+    add = torch.ops.aten.add.Tensor(arg0_1, 6);  arg0_1 = None
+    return (add,)""",
         )
 
     def test_weakref_cleanup(self):
@@ -2898,14 +2949,13 @@ def forward(self, L_x_ : torch.Tensor):
         res.sum().backward()
 
         actual = normalize_gm(backend.graphs[0].print_readable(print_output=False))
-        fx_class = _illegal_char_regex.sub("_", get_opaque_type_name(OpaqueMultiplier))
         self.assertExpectedInline(
             actual,
-            f"""\
+            """\
 class GraphModule(torch.nn.Module):
-    def forward(self, L_scale_obj_ : {fx_class}, L_x_: "f32[2, 2]"):
-        l_scale_obj_ = L_scale_obj_
+    def forward(self, L_x_: "f32[2, 2]", L_scale_obj_ : __main___OpaqueMultiplier):
         l_x_ = L_x_
+        l_scale_obj_ = L_scale_obj_
 
         subgraph_0 = self.subgraph_0
         invoke_subgraph = torch.ops.higher_order.invoke_subgraph(subgraph_0, 'subgraph_0', l_scale_obj_, l_x_);  subgraph_0 = l_scale_obj_ = l_x_ = None
@@ -2915,7 +2965,7 @@ class GraphModule(torch.nn.Module):
         return (add,)
 
     class subgraph_0(torch.nn.Module):
-        def forward(self, l_scale_obj_ : {fx_class}, l_x_: "f32[2, 2]"):
+        def forward(self, l_scale_obj_ : __main___OpaqueMultiplier, l_x_: "f32[2, 2]"):
             result: "f32[2, 2]" = torch.ops._TestOpaqueObject.mul_with_scale(l_scale_obj_, l_x_);  l_scale_obj_ = l_x_ = None
 
             result_1: "f32[2, 2]" = result * 2;  result = None

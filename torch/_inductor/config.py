@@ -373,6 +373,11 @@ dynamic_scale_rblock = os.environ.get("TORCHINDUCTOR_DYNAMIC_SCALE_RBLOCK", "1")
 # but the mul gets fused with other pointwise ops instead.
 force_fuse_int_mm_with_mul = False
 
+# Prevent unfusing addmm into mm+add for bf16/fp16 to avoid precision loss
+# from extra truncation at the mm output. Set to False to allow unfusing
+# (may improve perf at the cost of accuracy for some models).
+keep_addmm_fused_for_half_dtypes = True
+
 # DEPRECATED. This setting is ignored.
 use_mixed_mm = True
 
@@ -434,9 +439,18 @@ bucket_all_gathers_fx: Literal["none", "all", "only_fsdp"] = "none"
 # By default torch._inductor.fx_passes.bucketing.bucket_size_determinator is used
 bucket_all_gathers_fx_bucket_size_determinator: Callable[[int], int] | None = None
 
+bucket_all_gathers_bucket_mode: Literal[
+    "default", "custom_ops", "custom_ops_multidtype"
+] = "default"
+
 bucket_reduce_scatters_fx: Literal["none", "all"] = "none"
 # By default torch._inductor.fx_passes.bucketing.bucket_size_determinator is used
 bucket_reduce_scatters_fx_bucket_size_determinator: Callable[[int], int] | None = None
+
+bucket_reduce_scatters_bucket_mode: Literal[
+    "default", "custom_ops", "custom_ops_multidtype"
+] = "default"
+
 
 bucket_all_reduces_fx: Literal["none", "all"] = "none"
 # By default torch._inductor.fx_passes.bucketing.bucket_size_determinator is used
@@ -767,6 +781,16 @@ realize_opcount_threshold = 30
 realize_acc_reads_threshold = 8
 realize_acc_reads_size_threshold: int | None = (
     None  # TODO(xuanzh): harden this to make it non optional
+)
+
+# Defer early realization of cheap output nodes (0 buffer reads, small opcount)
+# to prevent cascade materialization in fullgraph compilation.
+# Shared constants/indices saved for backward get eagerly materialized because
+# they are graph outputs with multiple users, which inflates downstream read
+# counts and can trigger suboptimal Triton block size heuristics.
+delay_realize_cheap_outputs: bool = Config(
+    env_name_force="TORCHINDUCTOR_DELAY_REALIZE_CHEAP_OUTPUTS",
+    default=True,
 )
 
 # fallback to eager for random/dropout, this is slow but useful for debugging
@@ -1549,6 +1573,13 @@ class triton:
     # Default to None, which means we capture cudagraphs for all shapes.
     cudagraph_capture_sizes: tuple[int | tuple[int, ...]] | None = None
 
+    # Minimum number of nodes (kernels) required for a cudagraph partition.
+    # If a partition has fewer nodes than this threshold, it won't be cudagraphed.
+    # This helps avoid overhead for very small partitions where cudagraph
+    # recording/replay cost outweighs the benefits.
+    # Set to 0 to disable this check.
+    cudagraph_min_partition_size = 0
+
     # assertions not on the fast path, steady state
     slow_path_cudagraph_asserts = True
 
@@ -1826,6 +1857,10 @@ class triton:
         os.environ.get("TORCHINDUCTOR_MIX_ORDER_REDUCTION_ALLOW_MULTI_STAGES") == "1"
     )
 
+    enable_tlx_templates: bool = (
+        os.environ.get("TORCHINDUCTOR_ENABLE_TLX_TEMPLATES", "0") == "1"
+    )
+
     # Map for storing the amount of kernel runs with dumped input tensors
     # Based on hash of Triton source code to avoid bloating the folder
     debug_dump_kernel_inputs: dict[str, int] = {}
@@ -1834,14 +1869,6 @@ class triton:
     # When the maximum is reached the first values get overwritten
     # This ensures the last N runs are saved, where N is this value
     max_kernel_dump_occurrences = 3
-
-    # TLX template mode: "default", "allow", or "force"
-    tlx_mode: str = os.environ.get("TORCHINDUCTOR_TLX_MODE", "default")
-
-    # TLX heuristic config: when True, use heuristic-based config selection for TLX templates
-    tlx_heuristic_config: bool = (
-        os.environ.get("TORCHINDUCTOR_TLX_HEURISTIC_CONFIG", "1") == "1"
-    )
 
     proton_profiling: bool = (
         os.environ.get("TORCHINDUCTOR_TRITON_PROTON_PROFILING", "0") == "1"

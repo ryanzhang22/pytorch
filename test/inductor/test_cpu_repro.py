@@ -31,6 +31,7 @@ from torch.autograd.functional import vjp
 from torch.fx.experimental.proxy_tensor import make_fx
 from torch.nn import functional as F
 from torch.testing._internal.common_utils import (
+    get_gcc_major_version,
     instantiate_parametrized_tests,
     IS_ARM64,
     IS_CPU_CAPABILITY_SVE256,
@@ -4637,6 +4638,35 @@ class CPUReproTests(TestCase):
         torch.testing.assert_close(weight_cmp.grad, weight_ref.grad)
         torch.testing.assert_close(bias_cmp.grad, bias_ref.grad)
 
+    @torch._dynamo.config.patch(
+        capture_scalar_outputs=True, capture_dynamic_output_shape_ops=True
+    )
+    def test_backward_dynamic_item_from_size1_tensor(self):
+        def fn(x, w):
+            num = x.nonzero().numel()
+            num = x.new_tensor([num]).item()
+            y = w * x
+            return y.sum() / num
+
+        torch._dynamo.reset()
+        metrics.reset()
+
+        x = torch.tensor([0.0, 1.0, -1.0, 0.5])
+        w_ref = torch.tensor(0.0, requires_grad=True)
+        w_cmp = w_ref.detach().clone().requires_grad_(True)
+
+        eager_out = fn(x, w_ref)
+        eager_out.backward()
+
+        compiled = torch.compile(fn, backend="inductor", fullgraph=True, dynamic=True)
+        compiled_out = compiled(x, w_cmp)
+        compiled_out.backward()
+
+        self.assertEqual(eager_out.shape, torch.Size([]))
+        self.assertEqual(compiled_out.shape, eager_out.shape)
+        torch.testing.assert_close(compiled_out, eager_out)
+        torch.testing.assert_close(w_cmp.grad, w_ref.grad)
+
     @config.patch(emulate_precision_casts=True)
     def test_emulate_precision_casts_cpp_backend_no_error(self):
         """
@@ -5173,6 +5203,10 @@ class CPUReproTests(TestCase):
                     "at::vec::VectorizedN<double,2>::loadu", 2, exactly=True
                 ).run(code)
 
+    @unittest.skipIf(
+        get_gcc_major_version() == 13,
+        "Fails under GCC 13 due to vector codegen (passes with GCC 11)",
+    )
     def test_convert_fp32_to_double_vec(self):
         def fn(x):
             return x.to(torch.double)
