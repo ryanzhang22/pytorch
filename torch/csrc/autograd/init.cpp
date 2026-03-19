@@ -293,6 +293,16 @@ PyObject* THPAutograd_initExtension(PyObject* _unused, PyObject* unused) {
       .def(
           "linked_correlation_id",
           [](const KinetoEvent& e) { return e.linkedCorrelationId(); })
+      .def(
+          "activity_type",
+          [](const KinetoEvent& e) {
+#ifdef USE_KINETO
+            return libkineto::toString(
+                static_cast<libkineto::ActivityType>(e.activityType()));
+#else
+            return std::string();
+#endif
+          })
       .def("flow_id", [](const KinetoEvent& e) { return e.flowId(); })
       .def("flow_type", [](const KinetoEvent& e) { return e.flowType(); })
       .def("flow_start", [](const KinetoEvent& e) { return e.flowStart(); })
