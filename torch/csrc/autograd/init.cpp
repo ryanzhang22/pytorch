@@ -303,6 +303,9 @@ PyObject* THPAutograd_initExtension(PyObject* _unused, PyObject* unused) {
             return libkineto::toString(
                 static_cast<libkineto::ActivityType>(e.activityType()));
           })
+      .def(
+          "extra_meta",
+          [](const KinetoEvent& e) { return e.extraMeta(); })
       // compute flops
       .def("flops", [](const KinetoEvent& e) { return e.flops(); })
       // Whether this is async event or not
