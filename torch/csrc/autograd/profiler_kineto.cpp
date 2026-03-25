@@ -510,6 +510,17 @@ struct KinetoThreadLocalState : public ProfilerStateBase {
       AddTensorboardFields add_tb(e, kinetoEvents.back());
       AddGenericMetadata add_generic(e, &config_);
 
+      // TorchOp metadata captured here (after AddGenericMetadata) so
+      // extra_meta_ fields are included. Must precede kineto_activity_ null.
+      if (config_.experimental_config.expose_kineto_event_metadata &&
+          e->kineto_activity_) {
+        e->visit(c10::overloaded(
+            [&](ExtraFields<EventType::TorchOp>& i) {
+              i.metadata_json_ = e->kineto_activity_->metadataJson();
+            },
+            [](auto&) {}));
+      }
+
       // It is not safe to use the activity after post processing.
       e->kineto_activity_ = nullptr;
     }

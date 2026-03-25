@@ -1097,10 +1097,9 @@ class TransferEvents {
       auto e = toResult(activity);
       if (e) {
         if (config_.experimental_config.expose_kineto_event_metadata) {
+          // Only Kineto events here; TorchOp metadata is captured later in
+          // materializeOpEvents after AddGenericMetadata populates extra_meta_.
           e->visit(c10::overloaded(
-              [&](ExtraFields<EventType::TorchOp>& i) {
-                i.metadata_json_ = activity->metadataJson();
-              },
               [&](ExtraFields<EventType::Kineto>& i) {
                 i.metadata_json_ = activity->metadataJson();
               },

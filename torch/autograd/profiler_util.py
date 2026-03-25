@@ -638,6 +638,7 @@ class FunctionEvent(FormattedTimesMixin):
         kwinputs=None,
         is_user_annotation=False,
         is_python_function=False,
+        activity_type=None,
         metadata_json=None,
         flow_id=None,
         flow_type=None,
@@ -686,6 +687,7 @@ class FunctionEvent(FormattedTimesMixin):
         self.self_cpu_percent = -1
         self.total_cpu_percent = -1
         self.total_device_percent = -1
+        self.activity_type: str | None = activity_type
         self.metadata_json = metadata_json
         self.flow_id: int | None = flow_id
         self.flow_type: int | None = flow_type
