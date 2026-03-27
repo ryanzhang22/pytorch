@@ -3883,8 +3883,8 @@ class TestPrivateUse1ProfilerState(TestCase):
 
 
 @unittest.skipIf(not kineto_available(), "Kineto is required")
+@unittest.skipIf(not torch.cuda.is_available(), "CUDA is required")
 class TestProfilerEventsParity(TestCase):
-    @unittest.skipIf(not torch.cuda.is_available(), "CUDA is required")
     def test_profiler_fwdbwd_flow_events_parity(self):
         """Verify that fwd->bwd flow fields on events() match Chrome trace JSON."""
         with profile(activities=[ProfilerActivity.CPU]) as prof:
