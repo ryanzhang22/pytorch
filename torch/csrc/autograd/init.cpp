@@ -320,6 +320,9 @@ PyObject* THPAutograd_initExtension(PyObject* _unused, PyObject* unused) {
       .def(
           "metadata_json",
           [](const KinetoEvent& e) { return e.metadataJson(); })
+      .def(
+          "kv_metadata",
+          [](const KinetoEvent& e) { return e.extraMeta(); })
       .def("activity_type", [](const KinetoEvent& e) {
         return libkineto::toString(
             static_cast<libkineto::ActivityType>(e.activityType()));

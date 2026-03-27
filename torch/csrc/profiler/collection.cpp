@@ -1118,6 +1118,38 @@ class TransferEvents {
               },
               [](auto&) { return; }));
         }
+        // Always extract structured metadata for GPU events
+        e->visit(c10::overloaded(
+            [&](ExtraFields<EventType::Kineto>& i) {
+              const auto type = activity->type();
+              auto extract = [&](const char* key) {
+                auto val = activity->getMetadataValue(key);
+                if (!val.empty()) {
+                  i.extra_meta_.emplace(key, std::move(val));
+                }
+              };
+              if (type == libkineto::ActivityType::CONCURRENT_KERNEL) {
+                for (const char* key :
+                     {"registers per thread",
+                      "shared memory",
+                      "grid",
+                      "block",
+                      "blocks per SM",
+                      "warps per SM",
+                      "est. achieved occupancy %",
+                      "stream"}) {
+                  extract(key);
+                }
+              } else if (
+                  type == libkineto::ActivityType::GPU_MEMCPY ||
+                  type == libkineto::ActivityType::GPU_MEMSET) {
+                for (const char* key :
+                     {"bytes", "memory bandwidth (GB/s)", "stream"}) {
+                  extract(key);
+                }
+              }
+            },
+            [](auto&) {}));
         const auto* linked_activity = activity->linkedActivity();
         if (linked_activity) {
           e->visit(c10::overloaded(

@@ -1,10 +1,11 @@
 # mypy: allow-untyped-defs
 import bisect
 import itertools
+import json
 import math
 from collections import defaultdict, namedtuple
 from operator import attrgetter
-from typing import Any
+from typing import Any, NamedTuple
 from typing_extensions import deprecated
 
 import torch
@@ -549,6 +550,38 @@ class Interval:
 Kernel = namedtuple("Kernel", ["name", "device", "duration"])
 
 
+class KernelInfo(NamedTuple):
+    registers_per_thread: int | None
+    shared_memory: int | None
+    grid: list[int] | None
+    block: list[int] | None
+    blocks_per_sm: float | None
+    warps_per_sm: float | None
+    occupancy: float | None
+    stream: int | None
+
+
+class TransferInfo(NamedTuple):
+    bytes: int | None
+    bandwidth_gb_s: float | None
+    stream: int | None
+
+
+def _meta_to_int(m: dict[str, str], key: str) -> int | None:
+    v = m.get(key)
+    return int(v) if v is not None else None
+
+
+def _meta_to_float(m: dict[str, str], key: str) -> float | None:
+    v = m.get(key)
+    return float(v) if v is not None else None
+
+
+def _meta_to_int_list(m: dict[str, str], key: str) -> list[int] | None:
+    v = m.get(key)
+    return json.loads(v) if v is not None else None
+
+
 class FunctionEvent(FormattedTimesMixin):
     """Profiling information about a single function.
 
@@ -644,6 +677,7 @@ class FunctionEvent(FormattedTimesMixin):
         flow_start=None,
         external_id=0,
         linked_correlation_id=0,
+        kv_metadata=None,
     ):
         self.id: int = id
         self.node_id: int = node_id
@@ -692,6 +726,7 @@ class FunctionEvent(FormattedTimesMixin):
         self.flow_start: bool | None = flow_start
         self.external_id: int = external_id
         self.linked_correlation_id: int = linked_correlation_id
+        self.kv_metadata: dict[str, str] | None = kv_metadata
 
     def append_kernel(self, name, device, duration):
         if self.device_type != DeviceType.CPU:
@@ -726,6 +761,33 @@ class FunctionEvent(FormattedTimesMixin):
         if parent.device_type != DeviceType.CPU:
             raise AssertionError("Expected parent device_type to be CPU")
         self.cpu_parent = parent
+
+    @property
+    def kernel_info(self) -> KernelInfo | None:
+        m = self.kv_metadata
+        if not m or "registers per thread" not in m:
+            return None
+        return KernelInfo(
+            registers_per_thread=_meta_to_int(m, "registers per thread"),
+            shared_memory=_meta_to_int(m, "shared memory"),
+            grid=_meta_to_int_list(m, "grid"),
+            block=_meta_to_int_list(m, "block"),
+            blocks_per_sm=_meta_to_float(m, "blocks per SM"),
+            warps_per_sm=_meta_to_float(m, "warps per SM"),
+            occupancy=_meta_to_float(m, "est. achieved occupancy %"),
+            stream=_meta_to_int(m, "stream"),
+        )
+
+    @property
+    def transfer_info(self) -> TransferInfo | None:
+        m = self.kv_metadata
+        if not m or "bytes" not in m:
+            return None
+        return TransferInfo(
+            bytes=_meta_to_int(m, "bytes"),
+            bandwidth_gb_s=_meta_to_float(m, "memory bandwidth (GB/s)"),
+            stream=_meta_to_int(m, "stream"),
+        )
 
     # Note: async events don't have children, are not used when computing 'self'
     # metrics of other events, have only total cpu time
