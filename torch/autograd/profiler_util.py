@@ -644,7 +644,6 @@ class FunctionEvent(FormattedTimesMixin):
         flow_start=None,
         external_id=0,
         linked_correlation_id=0,
-        activity_type=None,
         kineto_device_id=None,
     ):
         self.id: int = id
@@ -694,7 +693,6 @@ class FunctionEvent(FormattedTimesMixin):
         self.flow_start: bool | None = flow_start
         self.external_id: int = external_id
         self.linked_correlation_id: int = linked_correlation_id
-        self.activity_type: str | None = activity_type
         # Chrome trace pid. Always kineto_info_.device (OS PID for CPU events,
         # CUDA device index for GPU events). Unlike device_index, this does NOT
         # special-case Allocation/OutOfMemory events.

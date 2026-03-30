@@ -298,12 +298,6 @@ PyObject* THPAutograd_initExtension(PyObject* _unused, PyObject* unused) {
       .def("flow_type", [](const KinetoEvent& e) { return e.flowType(); })
       .def("flow_start", [](const KinetoEvent& e) { return e.flowStart(); })
       .def("external_id", [](const KinetoEvent& e) { return e.externalId(); })
-      .def(
-          "activity_type",
-          [](const KinetoEvent& e) {
-            return libkineto::toString(
-                static_cast<libkineto::ActivityType>(e.activityType()));
-          })
       // compute flops
       .def("flops", [](const KinetoEvent& e) { return e.flops(); })
       // Whether this is async event or not

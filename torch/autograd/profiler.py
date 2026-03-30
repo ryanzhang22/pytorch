@@ -701,7 +701,6 @@ class profile:
                 flow_start=kineto_event.flow_start(),
                 external_id=kineto_event.external_id(),
                 linked_correlation_id=kineto_event.linked_correlation_id(),
-                activity_type=kineto_event.activity_type(),
                 kineto_device_id=kineto_event.kineto_device_id(),
             )
             max_evt_id = max(max_evt_id, fe.id)
