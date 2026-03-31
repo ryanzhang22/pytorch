@@ -1,10 +1,11 @@
 # mypy: allow-untyped-defs
 import bisect
 import itertools
+import json
 import math
 from collections import defaultdict, namedtuple
 from operator import attrgetter
-from typing import Any
+from typing import Any, Callable, NamedTuple
 from typing_extensions import deprecated
 
 import torch
@@ -549,6 +550,127 @@ class Interval:
 Kernel = namedtuple("Kernel", ["name", "device", "duration"])
 
 
+class KernelMetadata(NamedTuple):
+    registers_per_thread: int | None
+    shared_memory: int | None
+    grid: list[int] | None
+    block: list[int] | None
+    blocks_per_sm: float | None
+    warps_per_sm: float | None
+    occupancy: float | None
+    stream: int | None
+    graph_id: int | None
+    graph_node_id: int | None
+    queued: int | None
+    context: int | None
+
+
+# Kineto key → NamedTuple field name
+_KERNEL_METADATA_KEYS: dict[str, str] = {
+    "registers per thread": "registers_per_thread",
+    "shared memory": "shared_memory",
+    "grid": "grid",
+    "block": "block",
+    "blocks per SM": "blocks_per_sm",
+    "warps per SM": "warps_per_sm",
+    "est. achieved occupancy %": "occupancy",
+    "stream": "stream",
+    "graph id": "graph_id",
+    "graph node id": "graph_node_id",
+    "queued": "queued",
+    "context": "context",
+}
+
+
+class MemoryMetadata(NamedTuple):
+    bytes: int | None
+    bandwidth_gb_s: float | None
+    stream: int | None
+    context: int | None
+
+
+_MEMORY_METADATA_KEYS: dict[str, str] = {
+    "bytes": "bytes",
+    "memory bandwidth (GB/s)": "bandwidth_gb_s",
+    "stream": "stream",
+    "context": "context",
+}
+
+
+class NcclMetadata(NamedTuple):
+    collective_name: str | None
+    dtype: str | None
+    in_msg_nelems: int | None
+    out_msg_nelems: int | None
+    in_split_size: str | None
+    out_split_size: str | None
+    global_rank_start: int | None
+    global_rank_stride: int | None
+    group_size: int | None
+    process_group_name: str | None
+    process_group_desc: str | None
+    group_ranks: str | None
+    rank: int | None
+    src_rank: int | None
+    dst_rank: int | None
+    seq: int | None
+    is_async: bool | None
+
+
+_NCCL_METADATA_KEYS: dict[str, str] = {
+    "Collective name": "collective_name",
+    "dtype": "dtype",
+    "In msg nelems": "in_msg_nelems",
+    "Out msg nelems": "out_msg_nelems",
+    "In split size": "in_split_size",
+    "Out split size": "out_split_size",
+    "Global rank start": "global_rank_start",
+    "Global rank stride": "global_rank_stride",
+    "Group size": "group_size",
+    "Process Group Name": "process_group_name",
+    "Process Group Description": "process_group_desc",
+    "Process Group Ranks": "group_ranks",
+    "Rank": "rank",
+    "Src Rank": "src_rank",
+    "Dst Rank": "dst_rank",
+    "Seq": "seq",
+    "Is asynchronized op": "is_async",
+}
+
+_METADATA_SCHEMAS: dict[type, dict[str, str]] = {
+    KernelMetadata: _KERNEL_METADATA_KEYS,
+    MemoryMetadata: _MEMORY_METADATA_KEYS,
+    NcclMetadata: _NCCL_METADATA_KEYS,
+}
+
+
+def _build_metadata(cls, extra_meta):
+    key_map = _METADATA_SCHEMAS[cls]
+    hints = cls.__annotations__
+    fields = {}
+    any_populated = False
+    for kineto_key, field_name in key_map.items():
+        v = extra_meta.get(kineto_key)
+        if v is not None:
+            # Unwrap Optional: X | None → X, then list[int] → list
+            t = hints[field_name].__args__[0]
+            t = getattr(t, "__origin__", t)
+            if t is int:
+                fields[field_name] = int(v)
+            elif t is float:
+                fields[field_name] = float(v)
+            elif t is str:
+                fields[field_name] = v.strip('"')
+            elif t is bool:
+                fields[field_name] = v == "1"
+            elif t is list:
+                fields[field_name] = json.loads(v)
+            any_populated = True
+        else:
+            fields[field_name] = None
+    return cls(**fields) if any_populated else None
+
+
 class FunctionEvent(FormattedTimesMixin):
     """Profiling information about a single function.
 
@@ -645,6 +767,7 @@ class FunctionEvent(FormattedTimesMixin):
         flow_start=None,
         external_id=0,
         linked_correlation_id=0,
+        extra_meta=None,
     ):
         self.id: int = id
         self.node_id: int = node_id
@@ -694,6 +817,15 @@ class FunctionEvent(FormattedTimesMixin):
         self.flow_start: bool | None = flow_start
         self.external_id: int = external_id
         self.linked_correlation_id: int = linked_correlation_id
+        self.kernel_metadata: KernelMetadata | None = (
+            _build_metadata(KernelMetadata, extra_meta) if extra_meta else None
+        )
+        self.memory_metadata: MemoryMetadata | None = (
+            _build_metadata(MemoryMetadata, extra_meta) if extra_meta else None
+        )
+        self.nccl_metadata: NcclMetadata | None = (
+            _build_metadata(NcclMetadata, extra_meta) if extra_meta else None
+        )
 
     def append_kernel(self, name, device, duration):
         if self.device_type != DeviceType.CPU:

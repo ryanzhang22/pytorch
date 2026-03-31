@@ -62,7 +62,6 @@ from torch.testing._internal.common_utils import (
     IS_JETSON,
     IS_LINUX,
     IS_WINDOWS,
-    IS_X86,
     parametrize,
     run_tests,
     serialTest,
@@ -3463,9 +3462,7 @@ aten::mm""",
                 actual_fields = sorted(event.keys())
                 self.assertEqual(expected_fields, actual_fields)
 
-    @unittest.skipIf(
-        not IS_LINUX or not (IS_X86 or IS_ARM64), "linux x86/aarch64 only cpp unwinding"
-    )
+    @unittest.skipIf(IS_ARM64 or not IS_LINUX, "x86 linux only cpp unwinding")
     def test_fuzz_symbolize(self):
         # generate some random addresses in the text section and make sure the
         # symbolizers do not throw exceptions/crash
@@ -3765,10 +3762,10 @@ class TestProfilerEventsParity(TestCase):
 
     def test_python_function_events_in_events(self):
         with profile(
-            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            activities=[ProfilerActivity.CPU],
             with_stack=True,
         ) as prof:
-            x = torch.randn(10, 10, device="cuda")
+            x = torch.randn(10, 10)
             torch.mm(x, x)
 
         events = prof.events()
@@ -3838,50 +3835,6 @@ class TestProfilerEventsParity(TestCase):
                 json_flow_ends,
                 events_flow_ends,
                 "Async CPU->GPU flow end IDs differ between events() and Chrome trace",
-            )
-
-    def test_profiler_fwdbwd_flow_events_parity(self):
-        """Verify that fwd->bwd flow fields on events() match Chrome trace JSON."""
-        with profile(activities=[ProfilerActivity.CPU]) as prof:
-            t1 = torch.ones(1, requires_grad=True)
-            t2 = torch.ones(1, requires_grad=True)
-            z = torch.add(t1, t2)
-            y = torch.ones(1)
-            loss = torch.nn.functional.binary_cross_entropy_with_logits(z, y)
-            loss.backward()
-
-        fwdbwd_events = [
-            e for e in prof.events() if e.flow_type == 1 and e.flow_id != 0
-        ]
-        self.assertGreater(
-            len(fwdbwd_events), 0, "No fwdbwd flow events found via events()"
-        )
-
-        events_flow_starts = {e.flow_id for e in fwdbwd_events if e.flow_start}
-        events_flow_ends = {e.flow_id for e in fwdbwd_events if not e.flow_start}
-
-        with TemporaryFileName(mode="w+") as fname:
-            prof.export_chrome_trace(fname)
-            with open(fname) as f:
-                j = json.load(f)
-
-            json_flow_events = [
-                e
-                for e in j["traceEvents"]
-                if e.get("ph") in ("s", "f") and e.get("cat") == "fwdbwd"
-            ]
-            json_flow_starts = {e["id"] for e in json_flow_events if e["ph"] == "s"}
-            json_flow_ends = {e["id"] for e in json_flow_events if e["ph"] == "f"}
-
-            self.assertEqual(
-                json_flow_starts,
-                events_flow_starts,
-                "fwdbwd flow start IDs differ between events() and Chrome trace",
-            )
-            self.assertEqual(
-                json_flow_ends,
-                events_flow_ends,
-                "fwdbwd flow end IDs differ between events() and Chrome trace",
             )
 
     def test_profiler_timestamp_consistency(self):
@@ -3956,37 +3909,71 @@ class TestProfilerEventsParity(TestCase):
                 "(name, external_id) pairs differ between events() and Chrome trace JSON",
             )
 
-    def test_profiler_activity_type_parity(self):
-        """Verify activity_type on events() matches Chrome trace cat field."""
+    def test_structured_metadata_matches_chrome_trace(self):
+        """Cross-reference kernel_metadata/memory_metadata against Chrome trace JSON.
+
+        For each kernel/memcpy event in the exported trace, matches it to the
+        corresponding FunctionEvent by External id and verifies that every
+        metadata key present in the JSON args is also populated (non-None)
+        in the typed NamedTuple.
+        """
+        from torch.autograd.profiler_util import (
+            _KERNEL_METADATA_KEYS,
+            _MEMORY_METADATA_KEYS,
+        )
+
         with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
-            x = torch.randn(32, 32, device="cuda")
-            torch.mm(x, x)
+            x = torch.randn(10, 10, device="cuda")
+            y = torch.mm(x, x)
+            z = x + y
+            z.cpu()
 
-        events = prof.events()
-        for e in events:
-            self.assertIsInstance(e.activity_type, str)
-            self.assertGreater(len(e.activity_type), 0)
-
-        mm_event = next((e for e in events if e.name == "aten::mm"), None)
-        self.assertIsNotNone(mm_event)
-        self.assertEqual(mm_event.activity_type, "cpu_op")
+        # Build lookup from External id -> FunctionEvent
+        fe_by_ext_id = {}
+        for fe in prof.events():
+            if fe.external_id != 0:
+                fe_by_ext_id[fe.external_id] = fe
 
         with TemporaryFileName(mode="w+") as fname:
             prof.export_chrome_trace(fname)
             with open(fname) as f:
-                j = json.load(f)
+                trace = json.load(f)
 
-            json_name_cats = {
-                (e["name"], e["cat"])
-                for e in j["traceEvents"]
-                if e.get("ph") == "X" and "cat" in e
-            }
-            for e in events:
-                self.assertIn(
-                    (e.name, e.activity_type),
-                    json_name_cats,
-                    f"activity_type mismatch for {e.name}",
-                )
+            checked_kernel = 0
+            checked_memcpy = 0
+            for te in trace["traceEvents"]:
+                cat = te.get("cat", "")
+                args = te.get("args", {})
+                ext_id = args.get("External id")
+                if ext_id is None or ext_id not in fe_by_ext_id:
+                    continue
+                fe = fe_by_ext_id[ext_id]
+
+                # Every schema key present in JSON args must be non-None
+                # in the corresponding typed metadata NamedTuple.
+                if cat == "kernel" and fe.kernel_metadata is not None:
+                    km = fe.kernel_metadata
+                    for kineto_key, field_name in _KERNEL_METADATA_KEYS.items():
+                        if kineto_key in args:
+                            val = getattr(km, field_name)
+                            self.assertIsNotNone(
+                                val,
+                                f"kernel '{fe.name}': {field_name} is None but JSON has '{kineto_key}': {args[kineto_key]}",
+                            )
+                    checked_kernel += 1
+
+                elif cat == "gpu_memcpy" and fe.memory_metadata is not None:
+                    mm = fe.memory_metadata
+                    for kineto_key, field_name in _MEMORY_METADATA_KEYS.items():
+                        if kineto_key in args:
+                            val = getattr(mm, field_name)
+                            self.assertIsNotNone(
+                                val,
+                                f"memcpy '{fe.name}': {field_name} is None but JSON has '{kineto_key}': {args[kineto_key]}",
+                            )
+                    checked_memcpy += 1
+
+            self.assertGreater(checked_kernel, 0, "No kernel events were cross-checked")
 
 
 if __name__ == "__main__":

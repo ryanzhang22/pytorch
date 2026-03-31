@@ -9,6 +9,8 @@
 #include <type_traits>
 #include <utility>
 
+#include <nlohmann/json.hpp>
+
 #include <fmt/format.h>
 
 #ifdef USE_KINETO
@@ -1118,6 +1120,26 @@ class TransferEvents {
               },
               [](auto&) { return; }));
         }
+        // Parse all Kineto activity metadata into extra_meta_.
+        // TODO: Replace JSON round-trip with direct map access once
+        // ITraceActivity exposes a dynamically typed metadata map.
+        e->visit(c10::overloaded(
+            [&](ExtraFields<EventType::Kineto>& i) {
+              auto json_str = activity->metadataJson();
+              if (!json_str.empty()) {
+                auto j = nlohmann::json::parse(
+                    "{" + json_str + "}", nullptr, false);
+                if (!j.is_discarded()) {
+                  for (auto& [key, val] : j.items()) {
+                    i.extra_meta_.emplace(
+                        key,
+                        val.is_string() ? val.get<std::string>()
+                                        : val.dump());
+                  }
+                }
+              }
+            },
+            [](auto&) {}));
         const auto* linked_activity = activity->linkedActivity();
         if (linked_activity) {
           e->visit(c10::overloaded(
