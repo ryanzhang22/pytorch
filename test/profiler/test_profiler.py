@@ -3909,6 +3909,72 @@ class TestProfilerEventsParity(TestCase):
                 "(name, external_id) pairs differ between events() and Chrome trace JSON",
             )
 
+    def test_structured_metadata_matches_chrome_trace(self):
+        """Cross-reference kernel_metadata/memory_metadata against Chrome trace JSON.
+
+        For each kernel/memcpy event in the exported trace, matches it to the
+        corresponding FunctionEvent by External id and verifies that every
+        metadata key present in the JSON args is also populated (non-None)
+        in the typed NamedTuple.
+        """
+        from torch.autograd.profiler_util import (
+            _KERNEL_METADATA_KEYS,
+            _MEMORY_METADATA_KEYS,
+        )
+
+        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+            x = torch.randn(10, 10, device="cuda")
+            y = torch.mm(x, x)
+            z = x + y
+            z.cpu()
+
+        # Build lookup from External id -> FunctionEvent
+        fe_by_ext_id = {}
+        for fe in prof.events():
+            if fe.external_id != 0:
+                fe_by_ext_id[fe.external_id] = fe
+
+        with TemporaryFileName(mode="w+") as fname:
+            prof.export_chrome_trace(fname)
+            with open(fname) as f:
+                trace = json.load(f)
+
+            checked_kernel = 0
+            checked_memcpy = 0
+            for te in trace["traceEvents"]:
+                cat = te.get("cat", "")
+                args = te.get("args", {})
+                ext_id = args.get("External id")
+                if ext_id is None or ext_id not in fe_by_ext_id:
+                    continue
+                fe = fe_by_ext_id[ext_id]
+
+                # Every schema key present in JSON args must be non-None
+                # in the corresponding typed metadata NamedTuple.
+                if cat == "kernel" and fe.kernel_metadata is not None:
+                    km = fe.kernel_metadata
+                    for kineto_key, field_name in _KERNEL_METADATA_KEYS.items():
+                        if kineto_key in args:
+                            val = getattr(km, field_name)
+                            self.assertIsNotNone(
+                                val,
+                                f"kernel '{fe.name}': {field_name} is None but JSON has '{kineto_key}': {args[kineto_key]}",
+                            )
+                    checked_kernel += 1
+
+                elif cat == "gpu_memcpy" and fe.memory_metadata is not None:
+                    mm = fe.memory_metadata
+                    for kineto_key, field_name in _MEMORY_METADATA_KEYS.items():
+                        if kineto_key in args:
+                            val = getattr(mm, field_name)
+                            self.assertIsNotNone(
+                                val,
+                                f"memcpy '{fe.name}': {field_name} is None but JSON has '{kineto_key}': {args[kineto_key]}",
+                            )
+                    checked_memcpy += 1
+
+            self.assertGreater(checked_kernel, 0, "No kernel events were cross-checked")
+
 
 if __name__ == "__main__":
     run_tests()
