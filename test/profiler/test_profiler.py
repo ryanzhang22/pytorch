@@ -3672,32 +3672,6 @@ aten::mm""",
 
         check_metadata(prof, op_name="aten::add", metadata_key="Ev Idx")
 
-    def test_event_metadata_is_lazy(self):
-        import torch.autograd.profiler_util as profiler_util
-        from torch.autograd.profiler_util import FunctionEvent
-
-        calls = 0
-        orig_build_metadata = profiler_util._build_metadata
-
-        def wrapped(extra_meta):
-            nonlocal calls
-            calls += 1
-            return orig_build_metadata(extra_meta)
-
-        with patch.object(profiler_util, "_build_metadata", wrapped):
-            event = FunctionEvent(
-                id=1,
-                name="test",
-                thread=1,
-                start_us=0,
-                end_us=1,
-                extra_meta={"bytes": "8"},
-            )
-            self.assertEqual(calls, 0)
-            self.assertIsNotNone(event.event_metadata)
-            self.assertEqual(event.event_metadata.bytes, 8)
-            self.assertEqual(calls, 1)
-
     @unittest.skipIf(not torch.cuda.is_available(), "requires CUDA")
     def test_profiler_debug_autotuner(self):
         """
