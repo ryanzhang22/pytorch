@@ -3665,7 +3665,11 @@ aten::mm""",
                         f"Could not find op '{op_name}' in prof.events()."
                     )
 
+        experimental_config = torch._C._profiler._ExperimentalConfig(
+            expose_kineto_event_metadata=True
+        )
         with profile(
+            experimental_config=experimental_config,
             activities=[ProfilerActivity.CPU],
         ) as prof:
             torch.add(1, 5)
@@ -4082,6 +4086,9 @@ class TestProfilerEventsParity(TestCase):
 
         with profile(
             activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            experimental_config=torch._C._profiler._ExperimentalConfig(
+                expose_kineto_event_metadata=True
+            ),
         ) as prof:
             x = torch.randn(10, 10, device="cuda")
             y = torch.mm(x, x)

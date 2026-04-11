@@ -3,11 +3,10 @@ import bisect
 import itertools
 import json
 import math
-import re
 from collections import defaultdict, namedtuple
 from collections.abc import Callable
 from operator import attrgetter
-from typing import Any, cast, NamedTuple
+from typing import Any, NamedTuple
 from typing_extensions import deprecated
 
 import torch
@@ -590,9 +589,6 @@ class EventMetadata(NamedTuple):
     is_async: bool | None
 
 
-_UNSET = object()
-
-
 def _to_int_list(v: str) -> list[int]:
     return json.loads(v)
 
@@ -652,22 +648,6 @@ def _build_metadata(extra_meta):
         else:
             fields[field_name] = None
     return EventMetadata(**fields) if any_populated else None
-
-
-def _parse_metadata_json(metadata_json: str) -> dict[str, str]:
-    if not metadata_json:
-        return {}
-
-    # Kineto may emit lowercase nan, which is invalid JSON syntax.
-    metadata_json = re.sub(r'(?<!")\bnan\b(?!")', "null", metadata_json)
-    try:
-        parsed = json.loads("{" + metadata_json + "}")
-    except json.JSONDecodeError:
-        return {}
-    return {
-        key: value if isinstance(value, str) else json.dumps(value)
-        for key, value in parsed.items()
-    }
 
 
 class FunctionEvent(FormattedTimesMixin):
@@ -833,8 +813,9 @@ class FunctionEvent(FormattedTimesMixin):
         self.flow_start: bool | None = flow_start
         self.external_id: int = external_id
         self.linked_correlation_id: int = linked_correlation_id
-        self._extra_meta = extra_meta
-        self._event_metadata: EventMetadata | None | object = _UNSET
+        self.event_metadata: EventMetadata | None = (
+            _build_metadata(extra_meta) if extra_meta else None
+        )
         # pyrefly: ignore [bad-assignment]
         self.structured_input_shapes: list = structured_input_shapes
         # pyrefly: ignore [bad-assignment]
@@ -844,15 +825,6 @@ class FunctionEvent(FormattedTimesMixin):
         self.python_id: int = python_id
         self.python_parent_id: int = python_parent_id
         self.python_module_id: int = python_module_id
-
-    @property
-    def event_metadata(self) -> EventMetadata | None:
-        if self._event_metadata is _UNSET:
-            extra_meta = self._extra_meta
-            if not extra_meta and self.metadata_json:
-                extra_meta = _parse_metadata_json(self.metadata_json)
-            self._event_metadata = _build_metadata(extra_meta) if extra_meta else None
-        return cast(EventMetadata | None, self._event_metadata)
 
     def append_kernel(self, name, device, duration):
         if self.device_type != DeviceType.CPU:
