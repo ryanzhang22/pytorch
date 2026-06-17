@@ -6,8 +6,10 @@
 #include <limits>
 #include <memory>
 #include <queue>
+#include <string_view>
 #include <type_traits>
 #include <utility>
+#include <variant>
 
 #include <fmt/format.h>
 #include <nlohmann/json.hpp>
@@ -936,6 +938,67 @@ void passEventsToKineto(
 }
 
 #ifdef USE_KINETO
+bool isLegacyOccupancyMetadataField(std::string_view name) {
+  static constexpr std::string_view kFields[] = {
+      "activeBlocksPerMultiprocessor",
+      "allocatedRegistersPerBlock",
+      "allocatedSharedMemPerBlock",
+      "blockLimitBarriers",
+      "blockLimitBlocks",
+      "blockLimitRegs",
+      "blockLimitSharedMem",
+      "blockLimitWarps",
+      "limitingFactors"};
+  return std::ranges::any_of(
+      kFields, [&](std::string_view field) { return name == field; });
+}
+
+c10::IValue typedValueToIValue(const libkineto::TypedValue& value) {
+  return std::visit(
+      c10::overloaded(
+          [](int64_t typed_value) -> c10::IValue { return typed_value; },
+          [](double typed_value) -> c10::IValue { return typed_value; },
+          [](bool typed_value) -> c10::IValue { return typed_value; },
+          [](const std::string& typed_value) -> c10::IValue {
+            return typed_value;
+          },
+          [](const std::vector<int64_t>& typed_value) -> c10::IValue {
+            return c10::List<int64_t>(c10::ArrayRef<int64_t>(typed_value));
+          },
+          [](const std::vector<std::string>& typed_value) -> c10::IValue {
+            return c10::List<std::string>(
+                c10::ArrayRef<std::string>(typed_value));
+          }),
+      value);
+}
+
+kineto_extra_meta_t typedMetadataFromActivity(
+    const libkineto::ITraceActivity& activity) {
+  const auto typed_metadata = activity.typedMetadata();
+  kineto_extra_meta_t out;
+  if (typed_metadata.empty()) {
+    return out;
+  }
+
+  c10::Dict<c10::IValue, c10::IValue> occupancy(
+      c10::AnyType::get(), c10::AnyType::get());
+  typed_metadata.visit(
+      [&](std::string_view name, const libkineto::TypedValue& value) {
+        if (activity.type() == libkineto::ActivityType::CONCURRENT_KERNEL &&
+            isLegacyOccupancyMetadataField(name)) {
+          occupancy.insert(
+              c10::IValue(std::string{name}), typedValueToIValue(value));
+          return;
+        }
+        out.emplace(std::string{name}, typedValueToIValue(value));
+      });
+
+  if (!occupancy.empty()) {
+    out.emplace("occupancy", c10::IValue(std::move(occupancy)));
+  }
+  return out;
+}
+
 // There are two mechanisms that we use to connect Profiler and Kineto events.
 // The first is the correlation ID. The profiler pushes a unique integer at the
 // start of an op and pops it at the end. Kineto then associates the events
@@ -1135,11 +1198,18 @@ class TransferEvents {
                     for (auto& [key, val] : j.items()) {
                       i.extra_meta_.emplace(
                           key,
-                          val.is_string() ? val.get<std::string>()
-                                          : val.dump());
+                          c10::IValue(
+                              val.is_string() ? val.get<std::string>()
+                                              : val.dump()));
                     }
                   }
                 }
+              },
+              [](auto&) {}));
+        } else {
+          e->visit(c10::overloaded(
+              [&](ExtraFields<EventType::Kineto>& i) {
+                i.extra_meta_ = typedMetadataFromActivity(*activity);
               },
               [](auto&) {}));
         }

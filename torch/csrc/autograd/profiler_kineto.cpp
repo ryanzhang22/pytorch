@@ -1372,7 +1372,11 @@ TYPED_ATTR(TorchOp, isAsync, e.is_async_)
 extra_meta_t KinetoEvent::extraMeta() const {
   extra_meta_t out;
   result_->visit(c10::overloaded(
-      [&](const ExtraFields<EventType::TorchOp>& e) { out = e.extra_meta_; },
+      [&](const ExtraFields<EventType::TorchOp>& e) {
+        for (const auto& [key, value] : e.extra_meta_) {
+          out.emplace(key, c10::IValue(value));
+        }
+      },
       [&](const ExtraFields<EventType::Kineto>& e) { out = e.extra_meta_; },
       [](const auto&) {}));
   return out;

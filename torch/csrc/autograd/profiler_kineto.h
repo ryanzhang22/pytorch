@@ -23,7 +23,7 @@ struct ActivityTraceWrapper;
 
 namespace autograd::profiler {
 using experimental_event_t = std::shared_ptr<torch::profiler::impl::Result>;
-using extra_meta_t = std::unordered_map<std::string, std::string>;
+using extra_meta_t = std::unordered_map<std::string, c10::IValue>;
 
 struct TORCH_API KinetoEvent {
   KinetoEvent(

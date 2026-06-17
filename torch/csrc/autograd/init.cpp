@@ -333,7 +333,15 @@ PyObject* THPAutograd_initExtension(PyObject* _unused, PyObject* unused) {
             return libkineto::toString(
                 static_cast<libkineto::ActivityType>(e.activityType()));
           })
-      .def("extra_meta", [](const KinetoEvent& e) { return e.extraMeta(); })
+      .def(
+          "extra_meta",
+          [](const KinetoEvent& e) {
+            std::unordered_map<std::string, py::object> metadata;
+            for (const auto& [key, value] : e.extraMeta()) {
+              metadata[key] = torch::jit::toPyObject(value);
+            }
+            return metadata;
+          })
       // Like shapes/strides, but also contains TensorList input shapes.
       .def(
           "structured_input_shapes",
