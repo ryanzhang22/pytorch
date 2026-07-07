@@ -2,13 +2,13 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 // Skip Kineto dependency on mobile unless explicitly asked for.
 // When is it explicitly asked for?
 //   KinetoEdgeCPUProfiler uses KinetoProfiler for cpu
 //   event profiling. This has a dependency on cpu only libkineto
-#if defined(USE_KINETO) && defined(C10_MOBILE) && \
-    !defined(EDGE_PROFILER_USE_KINETO)
+#if defined(USE_KINETO) && defined(C10_MOBILE) && !defined(EDGE_PROFILER_USE_KINETO)
 #undef USE_KINETO
 #endif
 
@@ -16,6 +16,7 @@
 
 #include <torch/csrc/Export.h>
 #include <torch/csrc/profiler/api.h>
+#include <torch/csrc/profiler/util.h>
 
 #ifdef USE_KINETO
 // Forward declarations so we don't have to include `libkineto.h` in a header.
@@ -59,24 +60,26 @@ using interface_trace_t = DummyTraceBuffer;
 struct activity_t;
 #endif // USE_KINETO
 
-void addMetadata(
-    activity_t* activity,
-    const std::string& key,
-    const std::string& value,
-    bool quote = false);
+void addMetadata(activity_t* activity, const std::string& key, const std::string& value, bool quote = false);
+
+// Typed metadata overloads.
+void addMetadata(activity_t* activity, const std::string& key, int64_t value);
+void addMetadata(activity_t* activity, const std::string& key, uint64_t value);
+void addMetadata(activity_t* activity, const std::string& key, const std::vector<std::string>& values);
+// shapes maps onto libkineto::InputShapes (see kineto_shim.cpp).
+void addMetadata(activity_t* activity, const std::string& key, const std::vector<shape>& shapes);
 
 // Wraps: libkineto::CpuTraceBuffer
 struct TraceWrapper {
   TraceWrapper(const int64_t start_time, const std::string& name);
 
   // The caller is expected to hold a mutex when calling `addCPUActivity`.
-  activity_t* addCPUActivity(
-      const std::string& name,
-      const libkineto::ActivityType type,
-      const DeviceAndResource device_and_resource,
-      const uint64_t correlation_id,
-      const int64_t start_time,
-      const int64_t end_time);
+  activity_t* addCPUActivity(const std::string& name,
+                             const libkineto::ActivityType type,
+                             const DeviceAndResource device_and_resource,
+                             const uint64_t correlation_id,
+                             const int64_t start_time,
+                             const int64_t end_time);
 
   void transferCpuTrace(int64_t end_time);
 
@@ -109,15 +112,12 @@ struct ActivityTraceWrapper {
 };
 
 using ActivitySet = std::set<torch::autograd::profiler::ActivityType>;
-using ActivityFilter = std::unordered_map<
-    torch::autograd::profiler::ActivityType,
-    std::unordered_set<std::string>>;
-void prepareTrace(
-    const bool cpuOnly,
-    const ActivitySet& activities,
-    const torch::profiler::impl::ExperimentalConfig& config,
-    const std::string& trace_id = "",
-    const ActivityFilter& activity_filter = {});
+using ActivityFilter = std::unordered_map<torch::autograd::profiler::ActivityType, std::unordered_set<std::string>>;
+void prepareTrace(const bool cpuOnly,
+                  const ActivitySet& activities,
+                  const torch::profiler::impl::ExperimentalConfig& config,
+                  const std::string& trace_id = "",
+                  const ActivityFilter& activity_filter = {});
 
 void toggleCollectionDynamic(const bool enable);
 void startTrace();
@@ -129,11 +129,10 @@ void popUserCorrelationId();
 void recordThreadInfo();
 bool collectivesProfilerExists();
 
-void logInvariantViolation(
-    const std::string& assertion,
-    const std::string& error,
-    const std::string& profile_id,
-    const std::string& group_profile_id);
+void logInvariantViolation(const std::string& assertion,
+                           const std::string& error,
+                           const std::string& profile_id,
+                           const std::string& group_profile_id);
 
 } // namespace impl::kineto
 
@@ -142,9 +141,7 @@ void logInvariantViolation(
 namespace autograd::profiler {
 c10::DeviceType deviceTypeFromActivity(libkineto::ActivityType activity_type);
 
-TORCH_API void addMetadataJson(
-    const std::string& key,
-    const std::string& value);
+TORCH_API void addMetadataJson(const std::string& key, const std::string& value);
 
 TORCH_API void profilerStep();
 

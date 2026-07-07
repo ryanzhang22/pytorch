@@ -217,12 +217,37 @@ struct MetadataBase {
       bool quote = false) {
     if (kinetoActivity_ && !value.empty() && value != "\"\"") {
       torch::profiler::impl::kineto::addMetadata(
-          // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
-          const_cast<torch::profiler::impl::kineto::activity_t*>(
-              kinetoActivity_),
-          key,
-          value,
-          quote);
+          mutableActivity(), key, value, quote);
+    }
+  }
+
+  // Typed overloads: the value keeps its declared type through the shim into
+  // libkineto instead of being stringified here. Emitted JSON is byte-identical
+  // to the old std::to_string path for these integer fields.
+  void addMetadata(const std::string& key, int64_t value) {
+    if (kinetoActivity_) {
+      torch::profiler::impl::kineto::addMetadata(mutableActivity(), key, value);
+    }
+  }
+
+  void addMetadata(const std::string& key, uint64_t value) {
+    if (kinetoActivity_) {
+      torch::profiler::impl::kineto::addMetadata(mutableActivity(), key, value);
+    }
+  }
+
+  void addMetadata(
+      const std::string& key,
+      const std::vector<std::string>& values) {
+    if (kinetoActivity_) {
+      torch::profiler::impl::kineto::addMetadata(
+          mutableActivity(), key, values);
+    }
+  }
+
+  void addMetadata(const std::string& key, const std::vector<shape>& shapes) {
+    if (kinetoActivity_) {
+      torch::profiler::impl::kineto::addMetadata(mutableActivity(), key, shapes);
     }
   }
 
@@ -231,6 +256,12 @@ struct MetadataBase {
   }
 
  private:
+  torch::profiler::impl::kineto::activity_t* mutableActivity() const {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
+    return const_cast<torch::profiler::impl::kineto::activity_t*>(
+        kinetoActivity_);
+  }
+
   const torch::profiler::impl::kineto::activity_t* kinetoActivity_{nullptr};
 };
 
@@ -294,12 +325,17 @@ struct AddGenericMetadata : public MetadataBase {
 
     if (arg_data.hasData) {
       if (get_record_concrete_inputs_enabled()) {
-        addMetadata("Input Dims", variantShapesToStr(arg_data.shapes));
+        // NB: unlike variantShapesToStr, the typed InputShapes serializer does
+        // not apply TENSOR_LIST_DISPLAY_LENGTH_LIMIT, so tensor lists longer
+        // than the limit now emit in full instead of collapsing to "[]".
+        addMetadata("Input Dims", arg_data.shapes);
       } else {
         addMetadata("Input Dims", shapesToStr(arg_data.shapesForKinetoEvent));
       }
-      addMetadata("Input Strides", variantShapesToStr(arg_data.strides));
-      addMetadata("Input type", strListToStr(arg_data.dtypes));
+      addMetadata("Input Strides", arg_data.strides);
+      // dtype strings never contain quotes/backslashes, so the typed vector
+      // path is byte-identical to strListToStr here (both emit ["a", "b"]).
+      addMetadata("Input type", arg_data.dtypes);
       if (!arg_data.concreteInputs.empty()) {
         addMetadata(
             "Concrete Inputs", ivalueListToStr(arg_data.concreteInputs));
@@ -362,11 +398,10 @@ struct AddGenericMetadata : public MetadataBase {
     // add information about an associated forward op, if a sequence number
     // is available (e.g. during training)
     if (op_event.sequence_number_ >= 0) {
-      addMetadata("Fwd thread id", std::to_string(op_event.forward_tid_));
-      addMetadata("Sequence number", std::to_string(op_event.sequence_number_));
+      addMetadata("Fwd thread id", op_event.forward_tid_);
+      addMetadata("Sequence number", op_event.sequence_number_);
     }
-    addMetadata(
-        "Record function id", std::to_string(op_event.record_function_id_));
+    addMetadata("Record function id", op_event.record_function_id_);
   }
 
   void operator()(ExtraFields<EventType::Backend>& backend_event) {
@@ -376,20 +411,23 @@ struct AddGenericMetadata : public MetadataBase {
   }
 
   void operator()(const ExtraFields<EventType::Allocation>& alloc) {
-    addMetadata("Device Type", std::to_string((int8_t)alloc.device_type_));
-    addMetadata("Device Id", std::to_string(alloc.device_index_));
-    addMetadata("Addr", std::to_string(reinterpret_cast<intptr_t>(alloc.ptr_)));
-    addMetadata("Bytes", std::to_string(alloc.alloc_size_));
-    addMetadata("Total Allocated", std::to_string(alloc.total_allocated_));
-    addMetadata("Total Reserved", std::to_string(alloc.total_reserved_));
+    addMetadata("Device Type", static_cast<int64_t>(alloc.device_type_));
+    addMetadata("Device Id", static_cast<int64_t>(alloc.device_index_));
+    addMetadata(
+        "Addr", static_cast<int64_t>(reinterpret_cast<intptr_t>(alloc.ptr_)));
+    addMetadata("Bytes", alloc.alloc_size_);
+    addMetadata(
+        "Total Allocated", static_cast<uint64_t>(alloc.total_allocated_));
+    addMetadata("Total Reserved", static_cast<uint64_t>(alloc.total_reserved_));
   }
 
   void operator()(const ExtraFields<EventType::OutOfMemory>& alloc) {
-    addMetadata("Device Type", std::to_string((int8_t)alloc.device_type_));
-    addMetadata("Device Id", std::to_string(alloc.device_index_));
-    addMetadata("Bytes", std::to_string(alloc.alloc_size_));
-    addMetadata("Total Allocated", std::to_string(alloc.total_allocated_));
-    addMetadata("Total Reserved", std::to_string(alloc.total_reserved_));
+    addMetadata("Device Type", static_cast<int64_t>(alloc.device_type_));
+    addMetadata("Device Id", static_cast<int64_t>(alloc.device_index_));
+    addMetadata("Bytes", alloc.alloc_size_);
+    addMetadata(
+        "Total Allocated", static_cast<uint64_t>(alloc.total_allocated_));
+    addMetadata("Total Reserved", static_cast<uint64_t>(alloc.total_reserved_));
   }
 
   template <typename T>

@@ -4,6 +4,7 @@
 #include <type_traits>
 
 #ifdef USE_KINETO
+#include <TypedMetadata.h>
 #include <libkineto.h>
 #endif
 
@@ -128,6 +129,42 @@ void addMetadata(
   } else {
     activity->addMetadata(key, value);
   }
+#endif // USE_KINETO
+}
+
+void addMetadata(activity_t* activity, const std::string& key, int64_t value) {
+#ifdef USE_KINETO
+  activity->addMetadata(libkineto::MetadataField<int64_t>{key}, value);
+#endif // USE_KINETO
+}
+
+void addMetadata(activity_t* activity, const std::string& key, uint64_t value) {
+#ifdef USE_KINETO
+  activity->addMetadata(libkineto::MetadataField<uint64_t>{key}, value);
+#endif // USE_KINETO
+}
+
+void addMetadata(
+    activity_t* activity,
+    const std::string& key,
+    const std::vector<std::string>& values) {
+#ifdef USE_KINETO
+  activity->addMetadata(
+      libkineto::MetadataField<std::vector<std::string>>{key}, values);
+#endif // USE_KINETO
+}
+
+void addMetadata(
+    activity_t* activity,
+    const std::string& key,
+    const std::vector<shape>& shapes) {
+#ifdef USE_KINETO
+  // std::vector<shape> and libkineto::InputShapes are the same type:
+  // vector<variant<vector<int64_t>, vector<vector<int64_t>>>>. The static_assert
+  // in GenericTraceActivity::addMetadata enforces the exact-type match at
+  // compile time, so this breaks loudly if either definition drifts.
+  activity->addMetadata(
+      libkineto::MetadataField<libkineto::InputShapes>{key}, shapes);
 #endif // USE_KINETO
 }
 
