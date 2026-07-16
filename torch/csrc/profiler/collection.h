@@ -171,7 +171,7 @@ struct ExtraFields<EventType::TorchOp> : TorchOpBasicFields {
       jit_stack_t&& jit_stack,
       jit_modules_t&& jit_modules,
       extra_args_t&& extra_args,
-      extra_meta_t&& extra_meta,
+      std::optional<CollectiveMetadata>&& collective_metadata,
       kwinputs_t&& kwinputs,
       FallbackPair&& device_fallback,
       bool allow_tf32_cublas,
@@ -184,7 +184,7 @@ struct ExtraFields<EventType::TorchOp> : TorchOpBasicFields {
         jit_stack_{std::move(jit_stack)},
         jit_modules_{std::move(jit_modules)},
         extra_args_{std::move(extra_args)},
-        extra_meta_{std::move(extra_meta)},
+        collective_metadata_{std::move(collective_metadata)},
         kwinputs_{std::move(kwinputs)},
         device_fallback_{std::move(device_fallback)},
         allow_tf32_cublas_{allow_tf32_cublas},
@@ -196,7 +196,7 @@ struct ExtraFields<EventType::TorchOp> : TorchOpBasicFields {
   jit_stack_t jit_stack_;
   jit_modules_t jit_modules_;
   extra_args_t extra_args_;
-  extra_meta_t extra_meta_;
+  std::optional<CollectiveMetadata> collective_metadata_;
   kwinputs_t kwinputs_;
   FallbackPair device_fallback_;
   bool allow_tf32_cublas_;
@@ -478,7 +478,7 @@ struct KinetoObserverContext : public at::ObserverContext {
 
     bool allow_tf32_cublas_;
     std::unique_ptr<perf_counters_t> counters_;
-    extra_meta_t* extra_nccl_meta_{};
+    std::optional<CollectiveMetadata>* collective_metadata_{};
   };
 
   explicit KinetoObserverContext(Event* event) : event_{event} {}
@@ -654,8 +654,9 @@ class TORCH_API ThreadLocalSubqueue {
     // with_flops
     AppendOnlyList<extra_args_t, BlockSize> extra_args_;
 
-    // report extra metadata, i.e. collective communication meta
-    AppendOnlyList<extra_meta_t, BlockSize> extra_meta_;
+    // Collective communication metadata.
+    AppendOnlyList<std::optional<CollectiveMetadata>, BlockSize>
+        collective_metadata_;
 
     // report kwinputs
     AppendOnlyList<kwinputs_t, BlockSize> kwinputs_;

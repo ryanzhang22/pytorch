@@ -459,6 +459,28 @@ static inline std::string format_list(
   }
 }
 
+static CollectiveMetadataList collect_list(
+    const std::vector<int64_t>& list,
+    bool truncate) {
+  CollectiveMetadataList result{
+      .prefix = list,
+      .last = list.empty() ? 0 : list.back(),
+      .original_size = list.size(),
+      .truncated = truncate && list.size() > kTruncateLength};
+  if (result.truncated) {
+    result.prefix.resize(kTruncateLength - 1);
+  }
+  return result;
+}
+
+static std::string format_collective_list(const CollectiveMetadataList& list) {
+  if (list.truncated) {
+    return fmt::format(
+        "\"[{}, ..., {}]\"", fmt::join(list.prefix, ", "), list.last);
+  }
+  return fmt::format("\"[{}]\"", fmt::join(list.prefix, ", "));
+}
+
 std::pair<bool, std::variant<int, std::vector<int>>> findStartAddrForTensors(
     const c10::IValue& val) {
   if (val.isTensor()) {
@@ -503,141 +525,225 @@ std::pair<bool, std::variant<int, std::vector<int>>> findStartAddrForTensors(
   }
 }
 
-std::unordered_map<std::string, std::string> saveNcclMeta(
-    // @lint-ignore CLANGTIDY
+std::optional<CollectiveMetadata> collectNcclMeta(
     const at::RecordFunction& fn,
-    // @lint-ignore CLANGTIDY
-    const SaveNcclMetaConfig& config) {
-  std::unordered_map<std::string, std::string> map;
+    bool truncate) {
 #ifdef USE_DISTRIBUTED
   auto debugInfo = dynamic_cast<ParamCommsDebugInfo*>(
       c10::ThreadLocalDebugInfo::get(c10::DebugInfoKind::PARAM_COMMS_INFO));
-
-  if (config.introspectMetadata) {
-    if (debugInfo == nullptr) {
-      LOG(WARNING) << "ParamCommsDebugInfo not available for function: "
-                   << fn.name();
-      return map;
-    }
-    auto& collective_name = debugInfo->getCollectiveName();
-    map.emplace(kCommsName, fmt::format("\"{}\"", collective_name));
-    map.emplace(
-        kDtype, fmt::format("\"{}\"", c10::toString(debugInfo->getDType())));
-    map.emplace(kInMsgNelems, std::to_string(debugInfo->getInMessageNelems()));
-    map.emplace(
-        kOutMsgNelems, std::to_string(debugInfo->getOutMessageNelems()));
-
-    auto& inSplitSizes = debugInfo->getInputSplitSizes();
-    map.emplace(kInSplit, format_list(inSplitSizes, config.truncate));
-
-    auto& outSplitSizes = debugInfo->getOutputSplitSizes();
-    map.emplace(kOutSplit, format_list(outSplitSizes, config.truncate));
-
-    auto globalRankStart = debugInfo->getGlobalRankStart();
-    if (globalRankStart >= 0) {
-      map.emplace(kGlobalRankStart, std::to_string(globalRankStart));
-    }
-    auto globalRankStride = debugInfo->getGlobalRankStride();
-    if (globalRankStride > 0) {
-      map.emplace(kGlobalRankStride, std::to_string(globalRankStride));
-    }
-    map.emplace(kGroupSize, std::to_string(debugInfo->getWorldSize()));
-    auto& group_name = debugInfo->getProcessGroupName();
-    if (!group_name.empty()) {
-      map.emplace(kProcessGroupName, fmt::format("\"{}\"", group_name));
-    }
-    auto& group_desc = debugInfo->getProcessGroupDesc();
-    if (!group_desc.empty()) {
-      map.emplace(kProcessGroupDesc, fmt::format("\"{}\"", group_desc));
-    }
-    auto& groupRanks = debugInfo->getGroupRanks();
-    map.emplace(kGroupRanks, format_list(groupRanks, config.truncate));
-
-    auto rank = debugInfo->getRank();
-    map.emplace(kRank, std::to_string(rank));
-    int nRanks = static_cast<int>(groupRanks.size());
-    if (collective_name == "send") {
-      if (rank >= 0 && rank < nRanks) {
-        map.emplace(kP2pDst, std::to_string(groupRanks[rank]));
-      }
-    } else if (collective_name == "recv") {
-      if (rank >= 0 && rank < nRanks) {
-        map.emplace(kP2pSrc, std::to_string(groupRanks[rank]));
-      }
-    }
-
-    auto seqNum = debugInfo->getSequenceNumber();
-    if (seqNum >= 0) {
-      map.emplace(kSeqNum, std::to_string(seqNum));
-
-      size_t comms_id = c10::get_hash(
-          debugInfo->getProcessGroupName(),
-          seqNum,
-          debugInfo->getIsP2P(),
-          globalRankStart,
-          globalRankStride,
-          debugInfo->getWorldSize());
-      map.emplace(kCommsId, std::to_string(comms_id));
-    }
+  if (debugInfo == nullptr) {
+    LOG(WARNING) << "ParamCommsDebugInfo not available for function: "
+                 << fn.name();
+    return std::nullopt;
   }
 
-  map.emplace(
-      kIsAsynchronizedOp, std::to_string(debugInfo->isAsynchronizedOp()));
+  const auto collective_name = debugInfo->getCollectiveName();
+  const auto& group_ranks = debugInfo->getGroupRanks();
+  const auto global_rank_start = debugInfo->getGlobalRankStart();
+  const auto global_rank_stride = debugInfo->getGlobalRankStride();
+  const auto rank = debugInfo->getRank();
 
+  CollectiveMetadata metadata{
+      .collective_name = collective_name,
+      .dtype = debugInfo->getDType(),
+      .in_msg_nelems = debugInfo->getInMessageNelems(),
+      .out_msg_nelems = debugInfo->getOutMessageNelems(),
+      .input_split_sizes =
+          collect_list(debugInfo->getInputSplitSizes(), truncate),
+      .output_split_sizes =
+          collect_list(debugInfo->getOutputSplitSizes(), truncate),
+      .group_size = debugInfo->getWorldSize(),
+      .group_ranks = collect_list(group_ranks, truncate),
+      .rank = rank,
+      .is_async = debugInfo->isAsynchronizedOp()};
+
+  if (global_rank_start >= 0) {
+    metadata.global_rank_start = global_rank_start;
+  }
+  if (global_rank_stride > 0) {
+    metadata.global_rank_stride = global_rank_stride;
+  }
+  auto group_name = debugInfo->getProcessGroupName();
+  if (!group_name.empty()) {
+    metadata.process_group_name = std::move(group_name);
+  }
+  auto group_desc = debugInfo->getProcessGroupDesc();
+  if (!group_desc.empty()) {
+    metadata.process_group_desc = std::move(group_desc);
+  }
+  if (rank >= 0 && rank < static_cast<int>(group_ranks.size())) {
+    if (collective_name == "send") {
+      metadata.p2p_dst = group_ranks[rank];
+    } else if (collective_name == "recv") {
+      metadata.p2p_src = group_ranks[rank];
+    }
+  }
+  const auto sequence_number = debugInfo->getSequenceNumber();
+  if (sequence_number >= 0) {
+    metadata.sequence_number = sequence_number;
+    metadata.comms_id = static_cast<uint64_t>(c10::get_hash(
+        debugInfo->getProcessGroupName(),
+        sequence_number,
+        debugInfo->getIsP2P(),
+        global_rank_start,
+        global_rank_stride,
+        debugInfo->getWorldSize()));
+  }
+  return metadata;
+#else
+  (void)fn;
+  (void)truncate;
+  return std::nullopt;
+#endif // USE_DISTRIBUTED
+}
+
+std::optional<std::string> captureNcclInputTensorStarts(
+    const at::RecordFunction& fn,
+    bool truncate) {
+#ifdef USE_DISTRIBUTED
   if (get_record_tensor_addrs_enabled()) {
     std::vector<std::string> addressList;
-    if (config.introspectInputs) {
-      auto num_inputs = fn.num_inputs();
-      const auto inputs = fn.inputs();
-      if (checkFunctionInputsForLogging(fn)) {
-        // need to account for Stack mode where the inputs are at the end.
-        size_t input_start = inputs.size() - num_inputs;
-        for (const auto i : c10::irange(input_start, inputs.size())) {
-          const c10::IValue& val = inputs[i];
-          auto [is_list, result] = findStartAddrForTensors(val);
-          if (is_list) {
-            auto const& list_result = std::get<std::vector<int>>(result);
-            addressList.push_back(
-                format_list(list_result, config.truncate, false));
-          } else {
-            auto scalar_result = std::get<int>(result);
-            addressList.push_back(std::to_string(scalar_result));
-          }
-          // today we record a lot of metadata in record_param_comms that shows
-          // up as inputs. here we only need the addresses of the first inputs,
-          // which are the real tensor inputs to the collective call. So let's
-          // break out of the loop here.
-          break;
+    const auto num_inputs = fn.num_inputs();
+    const auto inputs = fn.inputs();
+    if (checkFunctionInputsForLogging(fn)) {
+      // need to account for Stack mode where the inputs are at the end.
+      size_t input_start = inputs.size() - num_inputs;
+      for (const auto i : c10::irange(input_start, inputs.size())) {
+        const c10::IValue& val = inputs[i];
+        auto [is_list, result] = findStartAddrForTensors(val);
+        if (is_list) {
+          auto const& list_result = std::get<std::vector<int>>(result);
+          addressList.push_back(format_list(list_result, truncate, false));
+        } else {
+          auto scalar_result = std::get<int>(result);
+          addressList.push_back(std::to_string(scalar_result));
         }
-        map.emplace(kInTensorsStart, format_list(addressList, false));
-        addressList.clear();
+        // today we record a lot of metadata in record_param_comms that shows
+        // up as inputs. here we only need the addresses of the first inputs,
+        // which are the real tensor inputs to the collective call. So let's
+        // break out of the loop here.
+        break;
       }
-    }
-    if (config.introspectOutputs) {
-      const auto& outputs = fn.outputs();
-      auto num_outputs = fn.num_outputs();
-      if (checkFunctionOutputsForLogging(fn)) {
-        // need to account for Stack mode where the outputs are at the end.
-        size_t output_start = outputs.size() - num_outputs;
-        for (const auto i : c10::irange(output_start, outputs.size())) {
-          const c10::IValue& val = outputs[i];
-          auto [is_list, result] = findStartAddrForTensors(val);
-          if (is_list) {
-            auto const& list_result = std::get<std::vector<int>>(result);
-            addressList.push_back(
-                format_list(list_result, config.truncate, false));
-          } else {
-            auto scalar_result = std::get<int>(result);
-            addressList.push_back(std::to_string(scalar_result));
-          }
-        }
-        map.emplace(kOutTensorsStart, format_list(addressList, false));
-        addressList.clear();
-      }
+      return format_list(addressList, false);
     }
   }
+#else
+  (void)fn;
+  (void)truncate;
+#endif // USE_DISTRIBUTED
+  return std::nullopt;
+}
+
+std::optional<std::string> captureNcclOutputTensorStarts(
+    const at::RecordFunction& fn,
+    bool truncate) {
+#ifdef USE_DISTRIBUTED
+  if (get_record_tensor_addrs_enabled()) {
+    std::vector<std::string> addressList;
+    const auto& outputs = fn.outputs();
+    auto num_outputs = fn.num_outputs();
+    if (checkFunctionOutputsForLogging(fn)) {
+      // need to account for Stack mode where the outputs are at the end.
+      size_t output_start = outputs.size() - num_outputs;
+      for (const auto i : c10::irange(output_start, outputs.size())) {
+        const c10::IValue& val = outputs[i];
+        auto [is_list, result] = findStartAddrForTensors(val);
+        if (is_list) {
+          auto const& list_result = std::get<std::vector<int>>(result);
+          addressList.push_back(format_list(list_result, truncate, false));
+        } else {
+          auto scalar_result = std::get<int>(result);
+          addressList.push_back(std::to_string(scalar_result));
+        }
+      }
+      return format_list(addressList, false);
+    }
+  }
+#else
+  (void)fn;
+  (void)truncate;
+#endif // USE_DISTRIBUTED
+  return std::nullopt;
+}
+
+std::unordered_map<std::string, std::string> ncclMetaToLegacyMap(
+    const CollectiveMetadata& metadata,
+    const SaveNcclMetaConfig& config) {
+  std::unordered_map<std::string, std::string> map;
+#ifdef USE_DISTRIBUTED
+  if (config.introspectMetadata) {
+    map.emplace(
+        kCommsName, fmt::format("\"{}\"", metadata.collective_name));
+    map.emplace(
+        kDtype, fmt::format("\"{}\"", c10::toString(metadata.dtype)));
+    map.emplace(kInMsgNelems, std::to_string(metadata.in_msg_nelems));
+    map.emplace(kOutMsgNelems, std::to_string(metadata.out_msg_nelems));
+    map.emplace(kInSplit, format_collective_list(metadata.input_split_sizes));
+    map.emplace(
+        kOutSplit, format_collective_list(metadata.output_split_sizes));
+    if (metadata.global_rank_start) {
+      map.emplace(kGlobalRankStart, std::to_string(*metadata.global_rank_start));
+    }
+    if (metadata.global_rank_stride) {
+      map.emplace(
+          kGlobalRankStride, std::to_string(*metadata.global_rank_stride));
+    }
+    map.emplace(kGroupSize, std::to_string(metadata.group_size));
+    if (metadata.process_group_name) {
+      map.emplace(
+          kProcessGroupName,
+          fmt::format("\"{}\"", *metadata.process_group_name));
+    }
+    if (metadata.process_group_desc) {
+      map.emplace(
+          kProcessGroupDesc,
+          fmt::format("\"{}\"", *metadata.process_group_desc));
+    }
+    map.emplace(kGroupRanks, format_collective_list(metadata.group_ranks));
+    map.emplace(kRank, std::to_string(metadata.rank));
+    if (metadata.p2p_src) {
+      map.emplace(kP2pSrc, std::to_string(*metadata.p2p_src));
+    }
+    if (metadata.p2p_dst) {
+      map.emplace(kP2pDst, std::to_string(*metadata.p2p_dst));
+    }
+    if (metadata.sequence_number) {
+      map.emplace(kSeqNum, std::to_string(*metadata.sequence_number));
+    }
+    if (metadata.comms_id) {
+      map.emplace(kCommsId, std::to_string(*metadata.comms_id));
+    }
+  }
+  map.emplace(kIsAsynchronizedOp, std::to_string(metadata.is_async));
+  if (config.introspectInputs && metadata.input_tensor_starts) {
+    map.emplace(kInTensorsStart, *metadata.input_tensor_starts);
+  }
+  if (config.introspectOutputs && metadata.output_tensor_starts) {
+    map.emplace(kOutTensorsStart, *metadata.output_tensor_starts);
+  }
+#else
+  (void)metadata;
+  (void)config;
 #endif // USE_DISTRIBUTED
   return map;
+}
+
+std::unordered_map<std::string, std::string> saveNcclMeta(
+    const at::RecordFunction& fn,
+    const SaveNcclMetaConfig& config) {
+  auto metadata = collectNcclMeta(fn, config.truncate);
+  if (!metadata) {
+    return {};
+  }
+  if (config.introspectInputs) {
+    metadata->input_tensor_starts =
+        captureNcclInputTensorStarts(fn, config.truncate);
+  }
+  if (config.introspectOutputs) {
+    metadata->output_tensor_starts =
+        captureNcclOutputTensorStarts(fn, config.truncate);
+  }
+  return ncclMetaToLegacyMap(*metadata, config);
 }
 
 // ----------------------------------------------------------------------------

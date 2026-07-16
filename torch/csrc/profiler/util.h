@@ -5,6 +5,7 @@
 #include <list>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -14,7 +15,6 @@
 #include <c10/util/hash.h>
 #include <torch/csrc/Export.h>
 #include <torch/csrc/jit/frontend/source_range.h>
-#include <optional>
 
 // TODO: replace with pytorch/rfcs#43 when it is ready.
 #define SOFT_ASSERT(cond, ...)                         \
@@ -102,6 +102,40 @@ struct TORCH_API SaveNcclMetaConfig {
         introspectOutputs(introspectOutputs) {}
 };
 
+struct TORCH_API CollectiveMetadataList {
+  std::vector<int64_t> prefix;
+  int64_t last{0};
+  size_t original_size{0};
+  bool truncated{false};
+};
+
+struct TORCH_API CollectiveMetadata {
+  std::string collective_name;
+  at::ScalarType dtype;
+  int64_t in_msg_nelems;
+  int64_t out_msg_nelems;
+  CollectiveMetadataList input_split_sizes;
+  CollectiveMetadataList output_split_sizes;
+  int group_size;
+  CollectiveMetadataList group_ranks;
+  int rank;
+  bool is_async;
+
+  std::optional<int> global_rank_start;
+  std::optional<int> global_rank_stride;
+  std::optional<std::string> process_group_name;
+  std::optional<std::string> process_group_desc;
+  std::optional<int64_t> p2p_src;
+  std::optional<int64_t> p2p_dst;
+  std::optional<int64_t> sequence_number;
+  std::optional<uint64_t> comms_id;
+
+  // These strings contain pre-encoded JSON. Consumers must not quote or
+  // restructure them.
+  std::optional<std::string> input_tensor_starts;
+  std::optional<std::string> output_tensor_starts;
+};
+
 TORCH_API std::vector<FileLineFunc> prepareCallstack(
     const std::vector<jit::StackEntry>& cs);
 TORCH_API std::vector<std::string> callstackStr(
@@ -133,6 +167,18 @@ TORCH_API std::vector<std::string> inputTypes(const at::RecordFunction& fn);
 
 std::unordered_map<std::string, c10::IValue> TORCH_API
 saveExtraArgs(const at::RecordFunction& fn);
+TORCH_API std::optional<CollectiveMetadata> collectNcclMeta(
+    const at::RecordFunction& fn,
+    bool truncate);
+TORCH_API std::optional<std::string> captureNcclInputTensorStarts(
+    const at::RecordFunction& fn,
+    bool truncate);
+TORCH_API std::optional<std::string> captureNcclOutputTensorStarts(
+    const at::RecordFunction& fn,
+    bool truncate);
+TORCH_API std::unordered_map<std::string, std::string> ncclMetaToLegacyMap(
+    const CollectiveMetadata& metadata,
+    const SaveNcclMetaConfig& config = SaveNcclMetaConfig());
 std::unordered_map<std::string, std::string> TORCH_API saveNcclMeta(
     const at::RecordFunction& fn,
     const SaveNcclMetaConfig& config = SaveNcclMetaConfig());

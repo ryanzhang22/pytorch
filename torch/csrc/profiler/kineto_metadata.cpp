@@ -221,9 +221,15 @@ struct AddGenericMetadata : public MetadataBase {
         addMetadata(key, ivalueToStr(val, isString));
       }
     }
-    // Add extra metadata if any
-    for (const auto& [key, val] : op_event.extra_meta_) {
-      addMetadata(key, val);
+    if (op_event.collective_metadata_) {
+      const auto collective_metadata =
+          torch::profiler::impl::ncclMetaToLegacyMap(
+              *op_event.collective_metadata_,
+              torch::profiler::impl::SaveNcclMetaConfig{
+                  true, true, true, true});
+      for (const auto& [key, val] : collective_metadata) {
+        addMetadata(key, val);
+      }
     }
 
     if (config_ && !config_->experimental_config.performance_events.empty()) {

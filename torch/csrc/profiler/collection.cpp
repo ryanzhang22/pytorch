@@ -444,16 +444,15 @@ std::unique_ptr<KinetoObserverContext> ThreadLocalSubqueue::begin_op(
 
   auto out = std::make_unique<KinetoObserverContext>(event);
   out->pushed_correlation_id_ = pushed_correlation_id;
+  out->event_->collective_metadata_ =
+      torch_ops_.collective_metadata_.emplace_back();
   if (fn.isNcclMeta()) {
-    // Record NCCL metadata for specific CPU ops, switch off output
-    // introspection in this begin_op callback, we will do that in exit callback
-    // if needed.
-    torch::profiler::impl::SaveNcclMetaConfig ncclMetaConfig{
-        true, true, true, false};
-    out->event_->extra_nccl_meta_ = torch_ops_.extra_meta_.emplace_back(
-        torch::profiler::impl::saveNcclMeta(fn, ncclMetaConfig));
-  } else {
-    out->event_->extra_nccl_meta_ = torch_ops_.extra_meta_.emplace_back();
+    auto metadata = torch::profiler::impl::collectNcclMeta(fn, true);
+    if (metadata) {
+      metadata->input_tensor_starts =
+          torch::profiler::impl::captureNcclInputTensorStarts(fn, true);
+    }
+    *out->event_->collective_metadata_ = std::move(metadata);
   }
 
   if (config_.state == ProfilerState::KINETO_GPU_FALLBACK) {
@@ -556,7 +555,7 @@ void ThreadLocalSubqueue::TorchOpStorage::materialize(
   auto jit_stack = StealOrDefault(jit_stack_);
   auto jit_module = StealOrDefault(jit_modules_);
   auto extra_args = StealOrDefault(extra_args_);
-  auto extra_meta = StealOrDefault(extra_meta_);
+  auto collective_metadata = StealOrDefault(collective_metadata_);
   auto kwinputs = StealOrDefault(kwinputs_);
   auto gpu_fallback = StealOrDefault(device_fallback_);
 
@@ -570,7 +569,7 @@ void ThreadLocalSubqueue::TorchOpStorage::materialize(
         jit_stack(),
         jit_module(),
         extra_args(),
-        extra_meta(),
+        collective_metadata(),
         kwinputs(),
         gpu_fallback(),
         event->allow_tf32_cublas_,

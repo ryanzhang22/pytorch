@@ -443,13 +443,11 @@ void onFunctionExitImpl(
   kineto_ctx_ptr->event_->basic_fields_.end_tid_ =
       at::RecordFunction::currentThreadId();
   if (fn.isNcclMeta()) {
-    auto& extra_meta = *(kineto_ctx_ptr->event_->extra_nccl_meta_);
-    // Record only the outputs in this exit callback of the record function
-    torch::profiler::impl::SaveNcclMetaConfig ncclMetaConfig{
-        true, false, false, true};
-    auto additional_nccl_meta =
-        torch::profiler::impl::saveNcclMeta(fn, ncclMetaConfig);
-    extra_meta.insert(additional_nccl_meta.begin(), additional_nccl_meta.end());
+    auto& metadata = *kineto_ctx_ptr->event_->collective_metadata_;
+    if (metadata) {
+      metadata->output_tensor_starts =
+          torch::profiler::impl::captureNcclOutputTensorStarts(fn, true);
+    }
   }
   if (config.state == ProfilerState::KINETO_GPU_FALLBACK) {
     try {
@@ -1273,7 +1271,14 @@ TYPED_ATTR(TorchOp, isAsync, e.is_async_)
 extra_meta_t KinetoEvent::extraMeta() const {
   extra_meta_t out;
   result_->visit(c10::overloaded(
-      [&](const ExtraFields<EventType::TorchOp>& e) { out = e.extra_meta_; },
+      [&](const ExtraFields<EventType::TorchOp>& e) {
+        if (e.collective_metadata_) {
+          out = torch::profiler::impl::ncclMetaToLegacyMap(
+              *e.collective_metadata_,
+              torch::profiler::impl::SaveNcclMetaConfig{
+                  true, true, true, true});
+        }
+      },
       [&](const ExtraFields<EventType::Kineto>& e) { out = e.extra_meta_; },
       [](const auto&) {}));
   return out;
