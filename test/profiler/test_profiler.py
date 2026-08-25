@@ -27,6 +27,9 @@ from unittest.mock import patch
 # profiler test file. USDT is the highest libkineto log type, so use one level
 # above it.
 os.environ.setdefault("KINETO_LOG_LEVEL", "6")
+# These tests start profiler sessions back-to-back. Async CUPTI teardown may
+# finalize during the next session and drop its CUDA events.
+os.environ["TEARDOWN_CUPTI"] = "0"
 
 import torch
 import torch.nn as nn
