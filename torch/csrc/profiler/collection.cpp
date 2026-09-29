@@ -111,14 +111,10 @@ OpArgData parseArgData(const DecodedInputs& inputs) {
             },
             [&](const auto&) {}),
         input_shapes[i]);
-    std::visit(
-        c10::overloaded(
-            [&](const c10::IValue& val) {
-              concrete_inputs_list[i] = val;
-              dtypes[i] = "ScalarList";
-            },
-            [&](const auto&) {}),
-        inputs.concrete[i]);
+    if (const auto* val = std::get_if<c10::IValue>(&inputs.concrete[i])) {
+      concrete_inputs_list[i] = *val;
+      dtypes[i] = "ScalarList";
+    }
   }
 
   return OpArgData{
@@ -186,24 +182,12 @@ bool InputOutputEncoder::isSupportedScalarList(
   // collect it. This function checks whether the list is a scalar list
   // and whether its length is sufficiently short.
 
-  if (!get_record_concrete_inputs_enabled()) {
-    return false;
-  }
-
-  if (!list_candidate.isList()) {
+  if (!get_record_concrete_inputs_enabled() || !list_candidate.isList()) {
     return false;
   }
   auto list_ref = list_candidate.toListRef();
-  if (C10_UNLIKELY(list_ref.empty())) {
-    return true;
-  }
-  if (C10_UNLIKELY(!list_ref[0].isScalar())) {
-    return false;
-  }
-  if (C10_UNLIKELY(list_ref.size() > SCALAR_LIST_LENGTH_LIMIT)) {
-    return false;
-  }
-  return true;
+  return list_ref.empty() ||
+      (list_ref[0].isScalar() && list_ref.size() <= SCALAR_LIST_LENGTH_LIMIT);
 }
 
 auto InputOutputEncoder::getInputDecoder() {
@@ -221,25 +205,21 @@ auto InputOutputEncoder::getInputDecoder() {
         return {RawTensorMetadata(), sizes, strides};
       }
       const auto& raw_metadata = *tensor_metadata_it++;
-      for ([[maybe_unused]] const auto _ :
-           c10::irange(raw_metadata.size_dim_)) {
-        if (tensor_size_strides_it.exhausted()) {
-          LOG(WARNING)
-              << "Expected Tensor Size mismatch with raw Tensor metadata. Reported shapes may be inaccurate!";
-          return {raw_metadata, sizes, strides};
-        }
-        sizes.push_back(*tensor_size_strides_it++);
-      }
-      if (raw_metadata.layout_ == at::kStrided) {
+      auto read_dims = [&](std::vector<int64_t>& dst, const char* what) {
         for ([[maybe_unused]] const auto _ :
              c10::irange(raw_metadata.size_dim_)) {
           if (tensor_size_strides_it.exhausted()) {
             LOG(WARNING)
-                << "Expected Tensor Strides mismatch with raw Tensor metadata. Reported shapes may be inaccurate!";
-            return {raw_metadata, sizes, strides};
+                << "Expected Tensor " << what
+                << " mismatch with raw Tensor metadata. Reported shapes may be inaccurate!";
+            return false;
           }
-          strides.push_back(*tensor_size_strides_it++);
+          dst.push_back(*tensor_size_strides_it++);
         }
+        return true;
+      };
+      if (read_dims(sizes, "Size") && raw_metadata.layout_ == at::kStrided) {
+        read_dims(strides, "Strides");
       }
       return {raw_metadata, sizes, strides};
     };
@@ -391,27 +371,21 @@ std::unique_ptr<KinetoObserverContext> ThreadLocalSubqueue::begin_op(
 
   auto out = std::make_unique<KinetoObserverContext>(event);
   out->pushed_correlation_id_ = pushed_correlation_id;
-  if (fn.isNcclMeta()) {
-    torch::profiler::impl::SaveNcclMetaConfig nccl_meta_config{
-        true, true, true, false};
-    out->event_->collective_meta_ = torch_ops_.collective_meta_.emplace_back(
-        torch::profiler::impl::saveNcclMetaTyped(fn, nccl_meta_config));
-  } else {
-    out->event_->collective_meta_ = torch_ops_.collective_meta_.emplace_back();
-  }
+  out->event_->collective_meta_ = torch_ops_.collective_meta_.emplace_back(
+      fn.isNcclMeta()
+          ? saveNcclMetaTyped(fn, SaveNcclMetaConfig{true, true, true, false})
+          : collective_meta_t{});
 
-  if (config_.state == ProfilerState::KINETO_GPU_FALLBACK) {
+  const bool gpu_fallback = config_.state == ProfilerState::KINETO_GPU_FALLBACK;
+  if (gpu_fallback ||
+      config_.state == ProfilerState::KINETO_PRIVATEUSE1_FALLBACK) {
+    const auto* stubs = gpu_fallback ? cudaStubs() : privateuse1Stubs();
     try {
       out->fallback_ = torch_ops_.device_fallback_.emplace_back();
-      torch::profiler::impl::cudaStubs()->record(
-          nullptr, &out->fallback_->device_event_start_, nullptr);
+      stubs->record(nullptr, &out->fallback_->device_event_start_, nullptr);
     } catch (const std::exception& e) {
-      LOG(WARNING) << "Failed to record CUDA event. " << e.what();
+      LOG(WARNING) << "Failed to record device fallback event. " << e.what();
     }
-  } else if (config_.state == ProfilerState::KINETO_PRIVATEUSE1_FALLBACK) {
-    out->fallback_ = torch_ops_.device_fallback_.emplace_back();
-    torch::profiler::impl::privateuse1Stubs()->record(
-        nullptr, &out->fallback_->device_event_start_, nullptr);
   }
 
   event->start_time_ = c10::getApproximateTime();
@@ -521,32 +495,6 @@ void ThreadLocalSubqueue::TorchOpStorage::materialize(
 
   op_events_.clear();
   inputs_outputs_.clear();
-}
-
-template <size_t BlockSize>
-static void materialize_vulkan(
-    std::vector<std::shared_ptr<Result>>& out,
-    AppendOnlyList<ExtraFields<EventType::Vulkan>::raw_event_t, BlockSize>&
-        raw_events,
-    const std::function<c10::time_t(c10::approx_time_t)>& time_converter,
-    const uint64_t tid,
-    const kineto::DeviceAndResource& kineto_info) {
-  for (const auto& i : raw_events) {
-    const auto name_and_duration_ns =
-        torch::profiler::impl::vulkan::getShaderNameAndDurationNs(i.second);
-
-    out.emplace_back(Result::create(
-        /*start_time_ns_=*/time_converter(i.first),
-        /*start_tid_=*/tid,
-        /*kineto_info_=*/kineto_info,
-        /*extra_fields_=*/
-        ExtraFields<EventType::Vulkan>{
-            /*name_=*/std::get<0>(name_and_duration_ns),
-            /*duration_ns_=*/
-            static_cast<int64_t>(std::get<1>(name_and_duration_ns)),
-            /*in_tree_building_=*/false}));
-  }
-  raw_events.clear();
 }
 
 namespace {
@@ -930,61 +878,49 @@ void generateForwardBackwardLink(
     }
   }
 }
-#endif // USE_KINETO
 
 void generateForwardBackwardLinks(
     std::unique_ptr<torch::profiler::impl::kineto::trace_t>& cpu_trace,
     const std::vector<std::shared_ptr<Result>>& results) {
-#ifndef USE_KINETO
-}
-#else // USE_KINETO
   TORCH_INTERNAL_ASSERT(cpu_trace->activities.size() == results.size());
 
   // startThreadId_seqNum to pointer of activity.
   // Low-16bits of startThreadId and low-48bits seqNum are concatenated into
   // one uint64_t variable as key.
-
   std::unordered_map<uint64_t, libkineto::GenericTraceActivity*>
       tidSeq2activity;
   uint64_t fwd_bwd_link_id = 1;
 
-  using result_activity_t =
-      std::pair<Result*, libkineto::GenericTraceActivity*>;
-  std::vector<result_activity_t> torch_events;
+  struct TorchEvent {
+    c10::time_t end_time_ns;
+    const Result* result;
+    libkineto::GenericTraceActivity* activity;
+  };
+  std::vector<TorchEvent> torch_events;
 
+  // add information about an associated forward op, if a sequence number
+  // is available (e.g. during training)
   for (const auto idx : c10::irange(cpu_trace->activities.size())) {
-    auto& profiler_result = results[idx];
-    auto& activity = cpu_trace->activities[idx];
-
-    // add information about an associated forward op, if a sequence number
-    // is available (e.g. during training)
-
-    profiler_result->visit_if_base<ExtraFields<EventType::TorchOp>>(
-        [&](const auto& e) {
-          if (e.sequence_number_ >= 0) {
-            torch_events.emplace_back(profiler_result.get(), activity.get());
-          }
-        });
+    const auto& r = results[idx];
+    const auto* op =
+        std::get_if<ExtraFields<EventType::TorchOp>>(&r->extra_fields_);
+    if (op && op->sequence_number_ >= 0) {
+      torch_events.push_back(
+          {op->end_time_ns_, r.get(), cpu_trace->activities[idx].get()});
+    }
   }
 
-  // We need to visit the events in chronological order.
-  // So we sort them by end_time_ns_ before processing.
+  // Visit the events in chronological order of end time.
   std::sort(
       torch_events.begin(),
       torch_events.end(),
-      [](const result_activity_t& left, const result_activity_t& right) {
-        auto left_end_time =
-            std::get<ExtraFields<EventType::TorchOp>>(left.first->extra_fields_)
-                .end_time_ns_;
-        auto right_end_time = std::get<ExtraFields<EventType::TorchOp>>(
-                                  right.first->extra_fields_)
-                                  .end_time_ns_;
-        return left_end_time < right_end_time;
+      [](const TorchEvent& a, const TorchEvent& b) {
+        return a.end_time_ns < b.end_time_ns;
       });
 
-  for (auto& [profiler_result, activity] : torch_events) {
+  for (const auto& e : torch_events) {
     generateForwardBackwardLink(
-        *profiler_result, fwd_bwd_link_id, *activity, tidSeq2activity);
+        *e.result, fwd_bwd_link_id, *e.activity, tidSeq2activity);
   }
 }
 #endif // USE_KINETO
@@ -1044,9 +980,11 @@ void passEventsToKineto(
     }
   }
 
+#ifdef USE_KINETO
   if (get_fwd_bwd_enabled()) {
     generateForwardBackwardLinks(cpu_trace.get(), results);
   }
+#endif
 
   // Kineto adds the events that it collected.
   cpu_trace.transferCpuTrace(static_cast<int64_t>(end_time_ns));
@@ -1206,65 +1144,56 @@ class TransferEvents {
   void extractEventsFromTrace() {
     for (const auto* activity : trace_activities_) {
       auto e = toResult(activity);
-      if (e) {
-        // Flow data for Kineto events is already set during
-        // resultFromActivity(). TorchOp events need it copied here because
-        // their Result is created during RecordFunction callbacks, before
-        // flow data exists on the GenericTraceActivity.
-        e->visit(c10::overloaded(
-            [&](ExtraFields<EventType::TorchOp>& i) {
-              i.flow = {
-                  /*id=*/static_cast<uint32_t>(activity->flowId()),
-                  /*type=*/static_cast<uint32_t>(activity->flowType()),
-                  /*start=*/activity->flowStart()};
-            },
-            [](auto&) {}));
-        if (config_.get().experimental_config.expose_kineto_event_metadata) {
-          e->visit(c10::overloaded(
-              [&](ExtraFields<EventType::TorchOp>& i) {
-                i.metadata_json_ = activity->metadataJson();
-              },
-              [&](ExtraFields<EventType::Kineto>& i) {
-                i.metadata_json_ = activity->metadataJson();
-              },
-              [](auto&) { return; }));
-          // Parse metadataJson() into extra_meta_ so events() exposes
-          // Kineto metadata as typed fields without export_chrome_trace().
-          e->visit(c10::overloaded(
-              [&](ExtraFields<EventType::Kineto>& i) {
-                auto json_str = activity->metadataJson();
-                if (!json_str.empty()) {
-                  auto j = nlohmann::json::parse(
-                      "{" + json_str + "}", nullptr, false);
-                  if (!j.is_discarded()) {
-                    for (auto& [key, val] : j.items()) {
-                      i.extra_meta_.emplace(
-                          key,
-                          val.is_string() ? val.get<std::string>()
-                                          : val.dump());
-                    }
+      if (!e) {
+        continue;
+      }
+      const bool expose_metadata =
+          config_.get().experimental_config.expose_kineto_event_metadata;
+      const auto* linked_activity = activity->linkedActivity();
+      TORCH_INTERNAL_ASSERT(
+          !linked_activity ||
+          std::holds_alternative<ExtraFields<EventType::Kineto>>(
+              e->extra_fields_));
+      e->visit(c10::overloaded(
+          [&](ExtraFields<EventType::TorchOp>& i) {
+            // Flow data for Kineto events is already set during
+            // resultFromActivity(). TorchOp events need it copied here
+            // because their Result is created during RecordFunction
+            // callbacks, before flow data exists on the GenericTraceActivity.
+            i.flow = {
+                /*id=*/static_cast<uint32_t>(activity->flowId()),
+                /*type=*/static_cast<uint32_t>(activity->flowType()),
+                /*start=*/activity->flowStart()};
+            if (expose_metadata) {
+              i.metadata_json_ = activity->metadataJson();
+            }
+          },
+          [&](ExtraFields<EventType::Kineto>& i) {
+            if (expose_metadata) {
+              i.metadata_json_ = activity->metadataJson();
+              // Parse metadataJson() into extra_meta_ so events() exposes
+              // Kineto metadata as typed fields without export_chrome_trace().
+              if (!i.metadata_json_.empty()) {
+                auto j = nlohmann::json::parse(
+                    "{" + i.metadata_json_ + "}", nullptr, false);
+                if (!j.is_discarded()) {
+                  for (auto& [key, val] : j.items()) {
+                    i.extra_meta_.emplace(
+                        key,
+                        val.is_string() ? val.get<std::string>() : val.dump());
                   }
                 }
-              },
-              [](auto&) {}));
-          // Populate the data exposed as FunctionEvent.metadata.
-          e->visit(c10::overloaded(
-              [&](ExtraFields<EventType::Kineto>& i) {
-                IValueMetadataVisitor visitor;
-                activity->visitTypedMetadata(visitor);
-                i.typed_metadata_ = std::move(visitor).metadata();
-              },
-              [](auto&) { return; }));
-        }
-        const auto* linked_activity = activity->linkedActivity();
-        if (linked_activity) {
-          e->visit(c10::overloaded(
-              [&](ExtraFields<EventType::Kineto>& i) {
-                i.linked_activity_ = toResult(linked_activity);
-              },
-              [](auto&) { TORCH_INTERNAL_ASSERT(false); }));
-        }
-      }
+              }
+              // Populate the data exposed as FunctionEvent.metadata.
+              IValueMetadataVisitor visitor;
+              activity->visitTypedMetadata(visitor);
+              i.typed_metadata_ = std::move(visitor).metadata();
+            }
+            if (linked_activity) {
+              i.linked_activity_ = toResult(linked_activity);
+            }
+          },
+          [](auto&) {}));
     }
   }
 
@@ -1513,40 +1442,38 @@ void build_tree(std::vector<std::shared_ptr<Result>>& sorted_events) {
  * (adjust all child durations recursively)
  */
 int64_t adjust_durations_dfs(std::shared_ptr<Result>& r) {
-  if (SOFT_ASSERT(r != nullptr)) {
-    int64_t original_duration = r->endTimeNS() - r->start_time_ns_;
-    int64_t children_total_duration = std::accumulate(
-        r->children_.begin(),
-        r->children_.end(),
-        0,
-        [](int64_t acc, std::shared_ptr<Result>& child) {
-          return acc + adjust_durations_dfs(child);
-        });
-
-    if (children_total_duration > original_duration) {
-      r->visit(c10::overloaded(
-          [&r, &children_total_duration](ExtraFields<EventType::TorchOp>& i) {
-            i.end_time_ns_ = r->start_time_ns_ + children_total_duration;
-          },
-          [&children_total_duration](ExtraFields<EventType::Vulkan>& i) {
-            i.duration_ns_ = children_total_duration;
-          },
-          []([[maybe_unused]] ExtraFields<EventType::Allocation>& _) {
-            // Pass- Allocation events can't have children
-          },
-          [&](auto&) {
-            SOFT_ASSERT(
-                false,
-                "unexpected event type in mobile profiler adjust_durations_dfs: ",
-                r->name());
-          }));
-      return children_total_duration;
-    } else {
-      return original_duration;
-    }
-  } else {
+  if (!SOFT_ASSERT(r != nullptr)) {
     return 0;
   }
+  int64_t original_duration = r->endTimeNS() - r->start_time_ns_;
+  int64_t children_total_duration = std::accumulate(
+      r->children_.begin(),
+      r->children_.end(),
+      int64_t{0},
+      [](int64_t acc, std::shared_ptr<Result>& child) {
+        return acc + adjust_durations_dfs(child);
+      });
+  if (children_total_duration <= original_duration) {
+    return original_duration;
+  }
+
+  r->visit(c10::overloaded(
+      [&r, &children_total_duration](ExtraFields<EventType::TorchOp>& i) {
+        i.end_time_ns_ = r->start_time_ns_ + children_total_duration;
+      },
+      [&children_total_duration](ExtraFields<EventType::Vulkan>& i) {
+        i.duration_ns_ = children_total_duration;
+      },
+      []([[maybe_unused]] ExtraFields<EventType::Allocation>& _) {
+        // Pass- Allocation events can't have children
+      },
+      [&](auto&) {
+        SOFT_ASSERT(
+            false,
+            "unexpected event type in mobile profiler adjust_durations_dfs: ",
+            r->name());
+      }));
+  return children_total_duration;
 }
 
 /**
@@ -1559,40 +1486,41 @@ int64_t adjust_durations_dfs(std::shared_ptr<Result>& r) {
 int64_t adjust_timestamps_dfs(
     std::shared_ptr<Result>& r,
     int64_t new_start_time) {
-  if (SOFT_ASSERT(r != nullptr)) {
-    if (r->start_time_ns_ != new_start_time) {
-      // Adjust start time (keeping duration constant)
-      r->visit(c10::overloaded(
-          [&r, &new_start_time](ExtraFields<EventType::TorchOp>& i) {
-            i.end_time_ns_ =
-                new_start_time + (i.end_time_ns_ - r->start_time_ns_);
-          },
-          []([[maybe_unused]] ExtraFields<EventType::Vulkan>& i) {
-            // Pass- We don't need to manually adjust end time for Vulkan events
-          },
-          []([[maybe_unused]] ExtraFields<EventType::Allocation>& _) {
-            // Pass- No duration or end time to adjust
-          },
-          [&](auto&) {
-            SOFT_ASSERT(
-                false,
-                "unexpected event type in mobile profiler adjust_timestamps_dfs: ",
-                r->name());
-          }));
-      r->start_time_ns_ = new_start_time;
-    }
-    int64_t children_total_duration = std::accumulate(
-        r->children_.begin(),
-        r->children_.end(),
-        0,
-        [](int64_t acc, std::shared_ptr<Result>& child) {
-          return acc + (child->endTimeNS() - child->start_time_ns_);
-        });
+  if (!SOFT_ASSERT(r != nullptr)) {
+    return new_start_time;
+  }
+  if (r->start_time_ns_ != new_start_time) {
+    // Adjust start time (keeping duration constant)
+    r->visit(c10::overloaded(
+        [&r, &new_start_time](ExtraFields<EventType::TorchOp>& i) {
+          i.end_time_ns_ =
+              new_start_time + (i.end_time_ns_ - r->start_time_ns_);
+        },
+        []([[maybe_unused]] ExtraFields<EventType::Vulkan>& i) {
+          // Pass- We don't need to manually adjust end time for Vulkan events
+        },
+        []([[maybe_unused]] ExtraFields<EventType::Allocation>& _) {
+          // Pass- No duration or end time to adjust
+        },
+        [&](auto&) {
+          SOFT_ASSERT(
+              false,
+              "unexpected event type in mobile profiler adjust_timestamps_dfs: ",
+              r->name());
+        }));
+    r->start_time_ns_ = new_start_time;
+  }
+  int64_t children_total_duration = std::accumulate(
+      r->children_.begin(),
+      r->children_.end(),
+      int64_t{0},
+      [](int64_t acc, std::shared_ptr<Result>& child) {
+        return acc + (child->endTimeNS() - child->start_time_ns_);
+      });
 
-    int64_t child_start_time = r->endTimeNS() - children_total_duration;
-    for (std::shared_ptr<Result>& child : r->children_) {
-      child_start_time = adjust_timestamps_dfs(child, child_start_time);
-    }
+  int64_t child_start_time = r->endTimeNS() - children_total_duration;
+  for (std::shared_ptr<Result>& child : r->children_) {
+    child_start_time = adjust_timestamps_dfs(child, child_start_time);
   }
   return r->endTimeNS();
 }
@@ -1642,21 +1570,34 @@ RecordQueue::getRecords(
   std::vector<python_tracer::CompressedEvent> python_enters;
   for (auto& subqueue_it : sub_queues_) {
     auto& queue = *subqueue_it.second;
+    auto emit = [&](c10::time_t start_time_ns, auto extra_fields) {
+      out.emplace_back(Result::create(
+          start_time_ns,
+          queue.tid(),
+          queue.kineto_info(),
+          std::move(extra_fields)));
+    };
     auto materialize = [&](auto& events) {
       for (auto& i : events) {
-        c10::time_t start_time_ns = 0;
-        if constexpr (std::is_same_v<
-                          std::remove_reference_t<decltype(i)>,
-                          ExtraFields<EventType::Backend>>) {
-          start_time_ns = i.start_time_us_ * 1000;
+        using T = std::remove_reference_t<decltype(i)>;
+        if constexpr (std::is_same_v<T, ExtraFields<EventType::Backend>>) {
+          const c10::time_t start_ns = i.start_time_us_ * 1000;
+          emit(start_ns, std::move(i));
+        } else if constexpr (std::is_same_v<T, RawAllocation>) {
+          emit(converter(i.start_time_), ExtraFields<EventType::Allocation>(i));
+        } else if constexpr (std::is_same_v<
+                                 T,
+                                 ExtraFields<EventType::Vulkan>::raw_event_t>) {
+          auto [name, duration_ns] =
+              vulkan::getShaderNameAndDurationNs(i.second);
+          emit(
+              converter(i.first),
+              ExtraFields<EventType::Vulkan>{
+                  std::move(name), static_cast<int64_t>(duration_ns)});
         } else {
-          start_time_ns = converter(i.start_time_);
+          const auto start_ns = converter(i.start_time_);
+          emit(start_ns, std::move(i));
         }
-        out.emplace_back(Result::create(
-            /*start_time_ns_=*/start_time_ns,
-            /*start_tid_=*/queue.tid(),
-            /*kineto_info_=*/queue.kineto_info(),
-            /*extra_fields_=*/std::move(i)));
       }
       events.clear();
     };
@@ -1664,40 +1605,26 @@ RecordQueue::getRecords(
     queue.torch_ops_.materialize(
         out, converter, queue.tid(), queue.kineto_info());
     materialize(queue.backend_events_);
-    materialize_vulkan(
-        out, queue.vulkan_events_, converter, queue.tid(), queue.kineto_info());
-    for (auto& i : queue.allocations_) {
-      out.emplace_back(Result::create(
-          /*start_time_ns_=*/converter(i.start_time_),
-          /*start_tid_=*/queue.tid(),
-          /*kineto_info_=*/queue.kineto_info(),
-          /*extra_fields_=*/ExtraFields<EventType::Allocation>(i)));
-    }
-    queue.allocations_.clear();
+    materialize(queue.vulkan_events_);
+    materialize(queue.allocations_);
     materialize(queue.ooms_);
 
-    std::optional<int64_t> pending_start;
-    for (auto& e : queue.pythongc_) {
-      if (e.first.find("start") != std::string::npos) {
-        pending_start = e.second;
-      } else if (e.first.find("stop") != std::string::npos) {
-        if (pending_start.has_value()) {
-          out.emplace_back(Result::create(
-              /*start_time_ns_=*/converter(pending_start.value()),
-              /*start_tid_=*/queue.tid(),
-              /*kineto_info_=*/queue.kineto_info(),
-              /*extra_fields_=*/
-              // NOLINTNEXTLINE
-              ExtraFields<EventType::PythonGC>{
-                  e.first,
-                  converter(e.second) - converter(pending_start.value())}));
-          pending_start.reset();
-        } else {
-          // Handle the case where "stop" is found without a matching "start"
-          // For example, you might want to log a warning or take other action:
+    std::optional<c10::approx_time_t> pending_gc_start;
+    for (auto& [phase, time] : queue.pythongc_) {
+      if (phase.find("start") != std::string::npos) {
+        pending_gc_start = time;
+      } else if (phase.find("stop") != std::string::npos) {
+        if (!pending_gc_start.has_value()) {
           LOG(WARNING) << R"("stop" event found without a matching "start": )"
-                       << e.first;
+                       << phase;
+          continue;
         }
+        const auto start_ns = converter(*pending_gc_start);
+        emit(
+            start_ns,
+            ExtraFields<EventType::PythonGC>{
+                phase, converter(time) - start_ns});
+        pending_gc_start.reset();
       }
     }
 
@@ -1724,10 +1651,12 @@ RecordQueue::getRecords(
     python_tracer_.reset();
   }
 
+  auto by_start_time = [](const auto& a, const auto& b) {
+    return a->start_time_ns_ < b->start_time_ns_;
+  };
+
   if (config_.experimental_config.adjust_timestamps) {
-    std::stable_sort(out.begin(), out.end(), [](const auto& a, const auto& b) {
-      return a->start_time_ns_ < b->start_time_ns_;
-    });
+    std::stable_sort(out.begin(), out.end(), by_start_time);
     build_tree(out);
     adjust_timestamps(out);
     for (auto& r : out) {
@@ -1740,9 +1669,7 @@ RecordQueue::getRecords(
 
   auto trace = addKinetoEvents(out, start_time_ns, end_time_ns, config_);
 
-  std::stable_sort(out.begin(), out.end(), [](const auto& a, const auto& b) {
-    return a->start_time_ns_ < b->start_time_ns_;
-  });
+  std::stable_sort(out.begin(), out.end(), by_start_time);
 
   if (config_.report_input_shapes && config_.profile_memory) {
     calculateUniqueTensorIDs(out);
