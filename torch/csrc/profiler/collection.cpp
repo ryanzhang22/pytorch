@@ -182,12 +182,24 @@ bool InputOutputEncoder::isSupportedScalarList(
   // collect it. This function checks whether the list is a scalar list
   // and whether its length is sufficiently short.
 
-  if (!get_record_concrete_inputs_enabled() || !list_candidate.isList()) {
+  if (!get_record_concrete_inputs_enabled()) {
+    return false;
+  }
+
+  if (!list_candidate.isList()) {
     return false;
   }
   auto list_ref = list_candidate.toListRef();
-  return list_ref.empty() ||
-      (list_ref[0].isScalar() && list_ref.size() <= SCALAR_LIST_LENGTH_LIMIT);
+  if (C10_UNLIKELY(list_ref.empty())) {
+    return true;
+  }
+  if (C10_UNLIKELY(!list_ref[0].isScalar())) {
+    return false;
+  }
+  if (C10_UNLIKELY(list_ref.size() > SCALAR_LIST_LENGTH_LIMIT)) {
+    return false;
+  }
+  return true;
 }
 
 auto InputOutputEncoder::getInputDecoder() {
@@ -205,21 +217,25 @@ auto InputOutputEncoder::getInputDecoder() {
         return {RawTensorMetadata(), sizes, strides};
       }
       const auto& raw_metadata = *tensor_metadata_it++;
-      auto read_dims = [&](std::vector<int64_t>& dst, const char* what) {
+      for ([[maybe_unused]] const auto _ :
+           c10::irange(raw_metadata.size_dim_)) {
+        if (tensor_size_strides_it.exhausted()) {
+          LOG(WARNING)
+              << "Expected Tensor Size mismatch with raw Tensor metadata. Reported shapes may be inaccurate!";
+          return {raw_metadata, sizes, strides};
+        }
+        sizes.push_back(*tensor_size_strides_it++);
+      }
+      if (raw_metadata.layout_ == at::kStrided) {
         for ([[maybe_unused]] const auto _ :
              c10::irange(raw_metadata.size_dim_)) {
           if (tensor_size_strides_it.exhausted()) {
             LOG(WARNING)
-                << "Expected Tensor " << what
-                << " mismatch with raw Tensor metadata. Reported shapes may be inaccurate!";
-            return false;
+                << "Expected Tensor Strides mismatch with raw Tensor metadata. Reported shapes may be inaccurate!";
+            return {raw_metadata, sizes, strides};
           }
-          dst.push_back(*tensor_size_strides_it++);
+          strides.push_back(*tensor_size_strides_it++);
         }
-        return true;
-      };
-      if (read_dims(sizes, "Size") && raw_metadata.layout_ == at::kStrided) {
-        read_dims(strides, "Strides");
       }
       return {raw_metadata, sizes, strides};
     };
@@ -376,16 +392,18 @@ std::unique_ptr<KinetoObserverContext> ThreadLocalSubqueue::begin_op(
           ? saveNcclMetaTyped(fn, SaveNcclMetaConfig{true, true, true, false})
           : collective_meta_t{});
 
-  const bool gpu_fallback = config_.state == ProfilerState::KINETO_GPU_FALLBACK;
-  if (gpu_fallback ||
-      config_.state == ProfilerState::KINETO_PRIVATEUSE1_FALLBACK) {
-    const auto* stubs = gpu_fallback ? cudaStubs() : privateuse1Stubs();
+  if (config_.state == ProfilerState::KINETO_GPU_FALLBACK) {
     try {
       out->fallback_ = torch_ops_.device_fallback_.emplace_back();
-      stubs->record(nullptr, &out->fallback_->device_event_start_, nullptr);
+      torch::profiler::impl::cudaStubs()->record(
+          nullptr, &out->fallback_->device_event_start_, nullptr);
     } catch (const std::exception& e) {
-      LOG(WARNING) << "Failed to record device fallback event. " << e.what();
+      LOG(WARNING) << "Failed to record CUDA event. " << e.what();
     }
+  } else if (config_.state == ProfilerState::KINETO_PRIVATEUSE1_FALLBACK) {
+    out->fallback_ = torch_ops_.device_fallback_.emplace_back();
+    torch::profiler::impl::privateuse1Stubs()->record(
+        nullptr, &out->fallback_->device_event_start_, nullptr);
   }
 
   event->start_time_ = c10::getApproximateTime();
@@ -495,6 +513,32 @@ void ThreadLocalSubqueue::TorchOpStorage::materialize(
 
   op_events_.clear();
   inputs_outputs_.clear();
+}
+
+template <size_t BlockSize>
+static void materialize_vulkan(
+    std::vector<std::shared_ptr<Result>>& out,
+    AppendOnlyList<ExtraFields<EventType::Vulkan>::raw_event_t, BlockSize>&
+        raw_events,
+    const std::function<c10::time_t(c10::approx_time_t)>& time_converter,
+    const uint64_t tid,
+    const kineto::DeviceAndResource& kineto_info) {
+  for (const auto& i : raw_events) {
+    const auto name_and_duration_ns =
+        torch::profiler::impl::vulkan::getShaderNameAndDurationNs(i.second);
+
+    out.emplace_back(Result::create(
+        /*start_time_ns_=*/time_converter(i.first),
+        /*start_tid_=*/tid,
+        /*kineto_info_=*/kineto_info,
+        /*extra_fields_=*/
+        ExtraFields<EventType::Vulkan>{
+            /*name_=*/std::get<0>(name_and_duration_ns),
+            /*duration_ns_=*/
+            static_cast<int64_t>(std::get<1>(name_and_duration_ns)),
+            /*in_tree_building_=*/false}));
+  }
+  raw_events.clear();
 }
 
 namespace {
@@ -1442,38 +1486,40 @@ void build_tree(std::vector<std::shared_ptr<Result>>& sorted_events) {
  * (adjust all child durations recursively)
  */
 int64_t adjust_durations_dfs(std::shared_ptr<Result>& r) {
-  if (!SOFT_ASSERT(r != nullptr)) {
+  if (SOFT_ASSERT(r != nullptr)) {
+    int64_t original_duration = r->endTimeNS() - r->start_time_ns_;
+    int64_t children_total_duration = std::accumulate(
+        r->children_.begin(),
+        r->children_.end(),
+        0,
+        [](int64_t acc, std::shared_ptr<Result>& child) {
+          return acc + adjust_durations_dfs(child);
+        });
+
+    if (children_total_duration > original_duration) {
+      r->visit(c10::overloaded(
+          [&r, &children_total_duration](ExtraFields<EventType::TorchOp>& i) {
+            i.end_time_ns_ = r->start_time_ns_ + children_total_duration;
+          },
+          [&children_total_duration](ExtraFields<EventType::Vulkan>& i) {
+            i.duration_ns_ = children_total_duration;
+          },
+          []([[maybe_unused]] ExtraFields<EventType::Allocation>& _) {
+            // Pass- Allocation events can't have children
+          },
+          [&](auto&) {
+            SOFT_ASSERT(
+                false,
+                "unexpected event type in mobile profiler adjust_durations_dfs: ",
+                r->name());
+          }));
+      return children_total_duration;
+    } else {
+      return original_duration;
+    }
+  } else {
     return 0;
   }
-  int64_t original_duration = r->endTimeNS() - r->start_time_ns_;
-  int64_t children_total_duration = std::accumulate(
-      r->children_.begin(),
-      r->children_.end(),
-      int64_t{0},
-      [](int64_t acc, std::shared_ptr<Result>& child) {
-        return acc + adjust_durations_dfs(child);
-      });
-  if (children_total_duration <= original_duration) {
-    return original_duration;
-  }
-
-  r->visit(c10::overloaded(
-      [&r, &children_total_duration](ExtraFields<EventType::TorchOp>& i) {
-        i.end_time_ns_ = r->start_time_ns_ + children_total_duration;
-      },
-      [&children_total_duration](ExtraFields<EventType::Vulkan>& i) {
-        i.duration_ns_ = children_total_duration;
-      },
-      []([[maybe_unused]] ExtraFields<EventType::Allocation>& _) {
-        // Pass- Allocation events can't have children
-      },
-      [&](auto&) {
-        SOFT_ASSERT(
-            false,
-            "unexpected event type in mobile profiler adjust_durations_dfs: ",
-            r->name());
-      }));
-  return children_total_duration;
 }
 
 /**
@@ -1486,41 +1532,40 @@ int64_t adjust_durations_dfs(std::shared_ptr<Result>& r) {
 int64_t adjust_timestamps_dfs(
     std::shared_ptr<Result>& r,
     int64_t new_start_time) {
-  if (!SOFT_ASSERT(r != nullptr)) {
-    return new_start_time;
-  }
-  if (r->start_time_ns_ != new_start_time) {
-    // Adjust start time (keeping duration constant)
-    r->visit(c10::overloaded(
-        [&r, &new_start_time](ExtraFields<EventType::TorchOp>& i) {
-          i.end_time_ns_ =
-              new_start_time + (i.end_time_ns_ - r->start_time_ns_);
-        },
-        []([[maybe_unused]] ExtraFields<EventType::Vulkan>& i) {
-          // Pass- We don't need to manually adjust end time for Vulkan events
-        },
-        []([[maybe_unused]] ExtraFields<EventType::Allocation>& _) {
-          // Pass- No duration or end time to adjust
-        },
-        [&](auto&) {
-          SOFT_ASSERT(
-              false,
-              "unexpected event type in mobile profiler adjust_timestamps_dfs: ",
-              r->name());
-        }));
-    r->start_time_ns_ = new_start_time;
-  }
-  int64_t children_total_duration = std::accumulate(
-      r->children_.begin(),
-      r->children_.end(),
-      int64_t{0},
-      [](int64_t acc, std::shared_ptr<Result>& child) {
-        return acc + (child->endTimeNS() - child->start_time_ns_);
-      });
+  if (SOFT_ASSERT(r != nullptr)) {
+    if (r->start_time_ns_ != new_start_time) {
+      // Adjust start time (keeping duration constant)
+      r->visit(c10::overloaded(
+          [&r, &new_start_time](ExtraFields<EventType::TorchOp>& i) {
+            i.end_time_ns_ =
+                new_start_time + (i.end_time_ns_ - r->start_time_ns_);
+          },
+          []([[maybe_unused]] ExtraFields<EventType::Vulkan>& i) {
+            // Pass- We don't need to manually adjust end time for Vulkan events
+          },
+          []([[maybe_unused]] ExtraFields<EventType::Allocation>& _) {
+            // Pass- No duration or end time to adjust
+          },
+          [&](auto&) {
+            SOFT_ASSERT(
+                false,
+                "unexpected event type in mobile profiler adjust_timestamps_dfs: ",
+                r->name());
+          }));
+      r->start_time_ns_ = new_start_time;
+    }
+    int64_t children_total_duration = std::accumulate(
+        r->children_.begin(),
+        r->children_.end(),
+        0,
+        [](int64_t acc, std::shared_ptr<Result>& child) {
+          return acc + (child->endTimeNS() - child->start_time_ns_);
+        });
 
-  int64_t child_start_time = r->endTimeNS() - children_total_duration;
-  for (std::shared_ptr<Result>& child : r->children_) {
-    child_start_time = adjust_timestamps_dfs(child, child_start_time);
+    int64_t child_start_time = r->endTimeNS() - children_total_duration;
+    for (std::shared_ptr<Result>& child : r->children_) {
+      child_start_time = adjust_timestamps_dfs(child, child_start_time);
+    }
   }
   return r->endTimeNS();
 }
@@ -1570,34 +1615,21 @@ RecordQueue::getRecords(
   std::vector<python_tracer::CompressedEvent> python_enters;
   for (auto& subqueue_it : sub_queues_) {
     auto& queue = *subqueue_it.second;
-    auto emit = [&](c10::time_t start_time_ns, auto extra_fields) {
-      out.emplace_back(Result::create(
-          start_time_ns,
-          queue.tid(),
-          queue.kineto_info(),
-          std::move(extra_fields)));
-    };
     auto materialize = [&](auto& events) {
       for (auto& i : events) {
-        using T = std::remove_reference_t<decltype(i)>;
-        if constexpr (std::is_same_v<T, ExtraFields<EventType::Backend>>) {
-          const c10::time_t start_ns = i.start_time_us_ * 1000;
-          emit(start_ns, std::move(i));
-        } else if constexpr (std::is_same_v<T, RawAllocation>) {
-          emit(converter(i.start_time_), ExtraFields<EventType::Allocation>(i));
-        } else if constexpr (std::is_same_v<
-                                 T,
-                                 ExtraFields<EventType::Vulkan>::raw_event_t>) {
-          auto [name, duration_ns] =
-              vulkan::getShaderNameAndDurationNs(i.second);
-          emit(
-              converter(i.first),
-              ExtraFields<EventType::Vulkan>{
-                  std::move(name), static_cast<int64_t>(duration_ns)});
+        c10::time_t start_time_ns = 0;
+        if constexpr (std::is_same_v<
+                          std::remove_reference_t<decltype(i)>,
+                          ExtraFields<EventType::Backend>>) {
+          start_time_ns = i.start_time_us_ * 1000;
         } else {
-          const auto start_ns = converter(i.start_time_);
-          emit(start_ns, std::move(i));
+          start_time_ns = converter(i.start_time_);
         }
+        out.emplace_back(Result::create(
+            /*start_time_ns_=*/start_time_ns,
+            /*start_tid_=*/queue.tid(),
+            /*kineto_info_=*/queue.kineto_info(),
+            /*extra_fields_=*/std::move(i)));
       }
       events.clear();
     };
@@ -1605,26 +1637,40 @@ RecordQueue::getRecords(
     queue.torch_ops_.materialize(
         out, converter, queue.tid(), queue.kineto_info());
     materialize(queue.backend_events_);
-    materialize(queue.vulkan_events_);
-    materialize(queue.allocations_);
+    materialize_vulkan(
+        out, queue.vulkan_events_, converter, queue.tid(), queue.kineto_info());
+    for (auto& i : queue.allocations_) {
+      out.emplace_back(Result::create(
+          /*start_time_ns_=*/converter(i.start_time_),
+          /*start_tid_=*/queue.tid(),
+          /*kineto_info_=*/queue.kineto_info(),
+          /*extra_fields_=*/ExtraFields<EventType::Allocation>(i)));
+    }
+    queue.allocations_.clear();
     materialize(queue.ooms_);
 
-    std::optional<c10::approx_time_t> pending_gc_start;
-    for (auto& [phase, time] : queue.pythongc_) {
-      if (phase.find("start") != std::string::npos) {
-        pending_gc_start = time;
-      } else if (phase.find("stop") != std::string::npos) {
-        if (!pending_gc_start.has_value()) {
+    std::optional<int64_t> pending_start;
+    for (auto& e : queue.pythongc_) {
+      if (e.first.find("start") != std::string::npos) {
+        pending_start = e.second;
+      } else if (e.first.find("stop") != std::string::npos) {
+        if (pending_start.has_value()) {
+          out.emplace_back(Result::create(
+              /*start_time_ns_=*/converter(pending_start.value()),
+              /*start_tid_=*/queue.tid(),
+              /*kineto_info_=*/queue.kineto_info(),
+              /*extra_fields_=*/
+              // NOLINTNEXTLINE
+              ExtraFields<EventType::PythonGC>{
+                  e.first,
+                  converter(e.second) - converter(pending_start.value())}));
+          pending_start.reset();
+        } else {
+          // Handle the case where "stop" is found without a matching "start"
+          // For example, you might want to log a warning or take other action:
           LOG(WARNING) << R"("stop" event found without a matching "start": )"
-                       << phase;
-          continue;
+                       << e.first;
         }
-        const auto start_ns = converter(*pending_gc_start);
-        emit(
-            start_ns,
-            ExtraFields<EventType::PythonGC>{
-                phase, converter(time) - start_ns});
-        pending_gc_start.reset();
       }
     }
 
