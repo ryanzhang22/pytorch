@@ -190,8 +190,9 @@ inline constexpr MetadataField<uint64_t> kEngineOrdinal{"engine_ordinal"};
 inline constexpr MetadataField<uint64_t> kKernelId{"kernel_id"};
 inline constexpr MetadataField<double> kMemoryBandwidthGbps{
     "memory bandwidth (GB/s)"};
+// The misspelled key is part of the emitted trace format.
 inline constexpr MetadataField<uint64_t> kMemoryOperationId{
-    "memory opration id"};
+    "memory opration id"}; // codespell:ignore
 inline constexpr MetadataField<uint64_t> kNumberWaitEvents{
     "Number_wait_events"};
 inline constexpr MetadataField<uint64_t> kOverheadCost{"overhead cost"};

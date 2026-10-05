@@ -90,6 +90,10 @@ include_patterns = [
     'torch/headeronly/**/*.h',
     'test/cpp/**/*.h',
     'test/cpp/**/*.cpp',
+    'third_party/kineto/**/*.h',
+    'third_party/kineto/**/*.cpp',
+    'third_party/kineto/**/*.cu',
+    'third_party/kineto/**/*.cuh',
 ]
 exclude_patterns = [
     'aten/src/ATen/native/vulkan/api/vk_mem_alloc.h',
@@ -100,6 +104,7 @@ exclude_patterns = [
     'torch/csrc/jit/serialization/mobile_bytecode_generated.h',
     'torch/csrc/utils/pythoncapi_compat.h',
     'aten/src/ATen/dlpack.h',
+    'third_party/kineto/libkineto/third_party/**',
 ]
 init_command = [
     'python3',
@@ -451,7 +456,11 @@ code = 'NEWLINE'
 include_patterns=['**']
 exclude_patterns=[
     '**/contrib/**',
-    'third_party/**',
+    # All of third_party/ except Kineto, which is linted as first-party code.
+    'third_party/*',
+    'third_party/[!k]*/**',
+    'third_party/k[!i]*/**',
+    'third_party/kineto/libkineto/third_party/**',
     '**/*.bat',
     '**/*.expect',
     '**/*.ipynb',
@@ -483,7 +492,11 @@ exclude_patterns = [
     '**/contrib/**',
     '**/*.diff',
     '**/*.patch',
-    'third_party/**',
+    # All of third_party/ except Kineto, which is linted as first-party code.
+    'third_party/*',
+    'third_party/[!k]*/**',
+    'third_party/k[!i]*/**',
+    'third_party/kineto/libkineto/third_party/**',
     'aten/src/ATen/native/vulkan/api/vk_mem_alloc.h',
     'fb/**',
     '**/fb/**',
@@ -511,7 +524,11 @@ exclude_patterns = [
     '**/*.svg',
     '**/*Makefile',
     '**/contrib/**',
-    'third_party/**',
+    # All of third_party/ except Kineto, which is linted as first-party code.
+    'third_party/*',
+    'third_party/[!k]*/**',
+    'third_party/k[!i]*/**',
+    'third_party/kineto/libkineto/third_party/**',
     '**/.gitattributes',
     '**/.gitmodules',
     'fb/**',
@@ -810,7 +827,11 @@ command = [
 code = 'EXEC'
 include_patterns = ['**']
 exclude_patterns = [
-    'third_party/**',
+    # All of third_party/ except Kineto, which is linted as first-party code.
+    'third_party/*',
+    'third_party/[!k]*/**',
+    'third_party/k[!i]*/**',
+    'third_party/kineto/libkineto/third_party/**',
     'torch/bin/**',
     '**/*.so',
     '**/*.py',
@@ -884,6 +905,7 @@ include_patterns = [
     'c10/**',
     'torch/csrc/**',
     'torch/nativert/**',
+    'third_party/kineto/**',
 ]
 exclude_patterns = [
     'aten/src/ATen/cuda/CUDAContext.cpp',
@@ -895,6 +917,7 @@ exclude_patterns = [
     'c10/cuda/impl/CUDATest.cpp',
     'torch/csrc/cuda/nccl.cpp',
     '**/fb/**',
+    'third_party/kineto/libkineto/third_party/**',
 ]
 command = [
     'python3',
@@ -1287,7 +1310,11 @@ exclude_patterns = [
     'caffe2/**',
     'fb/**',
     '**/fb/**',
-    'third_party/**',
+    # All of third_party/ except Kineto, which is linted as first-party code.
+    'third_party/*',
+    'third_party/[!k]*/**',
+    'third_party/k[!i]*/**',
+    'third_party/kineto/libkineto/third_party/**',
     'test/cpython/**',
     'torch/_vendor/**',
     'torch/_inductor/fx_passes/serialized_patterns/**',
@@ -2080,7 +2107,11 @@ exclude_patterns = [
     'cmake/TorchConfig.cmake.in',
     'cmake/TorchConfigVersion.cmake.in',
     'cmake/cmake_uninstall.cmake.i',
-    'third_party/**',
+    # All of third_party/ except Kineto, which is linted as first-party code.
+    'third_party/*',
+    'third_party/[!k]*/**',
+    'third_party/k[!i]*/**',
+    'third_party/kineto/libkineto/third_party/**',
     'fb/**',
     '**/fb/**',
 ]
