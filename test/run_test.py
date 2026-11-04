@@ -236,6 +236,7 @@ S390X_BLOCKLIST = [
     "inductor/test_cpu_repro",
     "lazy/test_meta_kernel",
     "profiler/test_profiler",
+    "profiler/test_chrome_trace_export",
     "test_jit",
     # these tests run long and fail in addition to that
     "dynamo/test_dynamic_shapes",
@@ -2095,6 +2096,7 @@ def get_selected_tests(options) -> list[str]:
                     "functorch/test_control_flow",
                     "nn/test_convolution",
                     "profiler/test_profiler",
+                    "profiler/test_chrome_trace_export",
                     "test_modules",
                     "test_expanded_weights",
                     "test_jit",
